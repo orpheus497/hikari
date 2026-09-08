@@ -47,17 +47,23 @@ lower case throughout this document and in hikari(1).
 
 ## Companion projects
 
-Hikari Sakura is designed to be used with two sibling projects, and takes the
+Hikari Sakura is designed to be used with three sibling projects, and takes the
 second half of its name from the display manager:
 
 | Project | Role |
 | --- | --- |
 | [**sofi**](https://github.com/orpheus497/sofi) | The shell: application menu, task strip, sheet switcher, notification daemon and history, system tray host, message toasts — each a `zwlr_layer_shell_v1` surface from one binary. |
+| [**saber**](https://github.com/orpheus497/saber) | The panel: a persistent vertical launcher in the tradition of the Unity 7 launcher — running indicators, quicklists, application dash, window spread, system tray and session controls, in one always-present column. |
 | [**sakura**](https://github.com/orpheus497/sakura) | The display manager: a FreeBSD-only TUI login manager that runs on a virtual terminal, talks to OpenPAM directly, and needs no graphical toolkit or session bus. |
 
-Both are optional — Hikari Sakura runs on its own, and any layer-shell client
-(`waybar`, `wofi`, `mako`) or display manager (GDM, SDDM, greetd) works in
-their place.
+`sofi` and `saber` complement rather than duplicate each other, and the
+difference is persistence: every `sofi` surface appears on a keypress and
+dismisses on selection, whereas `saber` is on screen for the whole session —
+aimed at without looking, showing at a glance what is running.
+
+All three are optional — Hikari Sakura runs on its own, and any layer-shell
+client (`waybar`, `wofi`, `mako`) or display manager (GDM, SDDM, greetd) works
+in their place.
 
 They are, however, what the defaults assume:
 
@@ -66,16 +72,22 @@ They are, however, what the defaults assume:
   switcher) and `L+n` (notification history). Without `sofi` installed those
   four bindings do nothing. Either install it or rebind the corresponding
   `actions` entries in `hikari.conf`.
-* **`sofi`'s sheet switcher is a client of the compositor's control socket.**
-  Hikari Sakura's ten-sheet-per-output model is not expressible in any
-  standards-track Wayland protocol, so the compositor exposes it over a small
-  Unix socket instead — see [The control socket](#the-control-socket).
+* **`sofi`'s sheet switcher and `saber`'s sheet indicator are both clients of
+  the compositor's control socket.** Hikari Sakura's ten-sheet-per-output model
+  is not expressible in any standards-track Wayland protocol, so the compositor
+  exposes it over a small Unix socket instead — see
+  [The control socket](#the-control-socket).
+* **`saber` is otherwise a plain Wayland client and patches nothing.** It lists
+  and acts on windows through `wlr-foreign-toplevel-management` and places its
+  surfaces with `wlr-layer-shell`, so it needs `WITH_LAYERSHELL` and
+  `WITH_FOREIGN_TOPLEVEL_MANAGEMENT` — both on by default. Start it from
+  [autostart](#autostart) if you want it.
 * **`sakura` launches the session through the installed `hikari.desktop`
   entry**, the same as any other display manager that reads
   `${PREFIX}/share/wayland-sessions`.
 
-Each project is built and installed independently; neither requires the other
-at build time.
+Each project is built and installed independently; none of them requires
+another at build time.
 
 ## Setting up Wayland on FreeBSD
 
@@ -218,18 +230,36 @@ The configuration file allows you to define:
   of the compositor to apply.
 - Hikari Sakura provides its own built-in status bar, described below. External
   layer-shell components such as `waybar` work alongside it if you prefer them.
+- Focus follows the mouse, but a layer-shell surface that asks for no keyboard
+  (`keyboard_interactivity none` — the setting a panel or dock normally uses)
+  does not change which output is active when you hover it. Moving onto a
+  window, or onto empty desktop, does. This keeps the active output and the
+  keyboard from disagreeing: the two used to drift apart when you passed over a
+  panel on a second monitor, after which view cycling operated on the wrong
+  screen.
+- `keyboard_interactivity on_demand` is currently treated as `exclusive` rather
+  than as click-to-focus. A layer-shell surface that requests it is given the
+  keyboard when it is focused rather than only once the user interacts with it.
+  This affects panels that open keyboard-driven menus; it does not affect
+  surfaces that ask for `none` or `exclusive`.
 
 ### Autostart
 
 On startup `hikari` executes `~/.config/hikari/autostart` if that file exists
-and is both readable and executable. Use it to start `sofi`'s daemons, a
-notification agent, a portal, or anything else your session needs:
+and is both readable and executable. Use it to start `saber`, `sofi`'s daemons,
+a notification agent, a portal, or anything else your session needs:
 
 ```sh
 #!/bin/sh
+saber &
 sofi -notification-daemon &
-sofi -tray-daemon &
 ```
+
+If you run `saber`, do **not** also run `sofi -tray-daemon`. Both are system
+tray hosts, and exactly one process on a session bus can own
+`org.kde.StatusNotifierWatcher` — the second to start finds the name taken and
+its tray stays empty. Notifications are unaffected: `sofi -notification-daemon`
+and `sofi -show notification-history` should keep running either way.
 
 `hikari -a <executable>` overrides the path for a single run.
 
@@ -311,7 +341,8 @@ to call.
 The compositor supplies that missing surface as a small request/response text
 socket at `$XDG_RUNTIME_DIR/hikari.sock`, mode `0600`. It reports which sheet is
 displayed and how many views each sheet holds, and accepts the two operations a
-switcher needs (`sheet` and `pin`). This is what `sofi -show sheets` speaks.
+switcher needs (`sheet` and `pin`). This is what `sofi -show sheets` and
+`saber`'s sheet indicator speak.
 
 It is deliberately minimal and is not a general scripting interface: anything
 expressible as a Wayland protocol belongs in a Wayland protocol. Every request
@@ -542,9 +573,9 @@ including `YES` — enables the feature.
 | `WITH_XWAYLAND` | on | Runs X11 clients through XWayland. |
 | `WITH_SCREENCOPY` | on | `wlr-screencopy`, used by `grim` and by screen sharing. |
 | `WITH_GAMMACONTROL` | on | Gamma control, needed by tools like `redshift`. |
-| `WITH_LAYERSHELL` | on | `zwlr_layer_shell_v1` — **required by `sofi`**, and by `waybar`, `wofi` and `slurp`. |
+| `WITH_LAYERSHELL` | on | `zwlr_layer_shell_v1` — **required by `sofi` and `saber`**, and by `waybar`, `wofi` and `slurp`. |
 | `WITH_VIRTUAL_INPUT` | on | Virtual keyboard and pointer, needed by applications like `wayvnc`. |
-| `WITH_FOREIGN_TOPLEVEL_MANAGEMENT` | on | `wlr-foreign-toplevel-management`, which is how external taskbars — including `sofi -show window` — enumerate and activate windows. Its wlroots header declares itself unstable, so the switch exists to build without it if a future wlroots drops the protocol. |
+| `WITH_FOREIGN_TOPLEVEL_MANAGEMENT` | on | `wlr-foreign-toplevel-management`, which is how external taskbars — including `sofi -show window` and `saber`'s launcher — enumerate and activate windows. **Required by `saber`.** Its wlroots header declares itself unstable, so the switch exists to build without it if a future wlroots drops the protocol. |
 | `WITH_EXT_IMAGE_CAPTURE` | **off** | `ext-image-copy-capture-v1`. Excluded from `WITH_ALL` on purpose — see below. |
 | `WITH_SUID` | **off** | Installs `hikari` itself setuid root (`4555` instead of `555`). |
 
@@ -701,7 +732,8 @@ Any environment variable can also be referenced from string values in
   layouts, the UI/palette/colorscheme/animation/lock/bar configuration, inputs,
   outputs, and the control socket protocol.
 * `etc/hikari/hikari.conf` — the annotated default configuration.
-* [sofi](https://github.com/orpheus497/sofi) and
+* [sofi](https://github.com/orpheus497/sofi),
+  [saber](https://github.com/orpheus497/saber) and
   [sakura](https://github.com/orpheus497/sakura) document their own
   configuration in their respective repositories.
 
