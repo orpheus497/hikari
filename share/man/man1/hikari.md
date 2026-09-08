@@ -715,6 +715,11 @@ can be used to specify certain properties you want for that view to apply.
   explicitly inherited resort to their default. If **inherit** is not specified
   the child view is going to use the parent's configuration.
 
+  Note the spelling of one entry: the inheritable name for **public** is
+  *publicview*. A string in this list that names no property is ignored without
+  a diagnostic, unlike an unknown key elsewhere in a *views* entry, so the list
+  is worth proof-reading.
+
 * **invisible**
 
   Takes a boolean to specify the view's **invisible** state on startup. The
@@ -986,6 +991,13 @@ asking for it.
 
   Defaults to *true*. Kept separate from *auto* because incorporating a new view
   only adds to a layout, whereas closing one moves every remaining view.
+
+Layouts are applied to an output's **usable area** rather than to the output
+itself, and that area is what is left after the top bar and after every panel
+that reserves space -- see **PANELS AND DOCKS**. A change to the reserved space
+is treated exactly like an output being moved or changing mode: with **auto**
+set the sheet re-tiles itself into the new box, and without it the views keep
+the geometry they had until a tiling action is issued.
 
 * **default-register**
 
@@ -1690,6 +1702,78 @@ is given during startup **hikari** will automatically configure the output.
   }
 }
 ```
+
+PANELS AND DOCKS
+================
+
+Panels, docks, notification daemons and wallpaper setters are ordinary clients
+speaking *wlr-layer-shell* (**saber**, **waybar**, **mako**, **swaybg**). The
+protocol is compiled in with *WITH\_LAYERSHELL*, which is on by default. There
+is nothing to configure for them in *hikari.conf*: a layer-shell client asks for
+its position, its size and its share of the screen over the protocol, and the
+compositor honours the request.
+
+A layer surface names the output it wants and is placed there; one that names
+none is placed on the output holding the focused workspace. Each of the
+protocol's four layers is a separate part of the scene graph, and views sit
+between them -- *background* and *bottom* are painted below every window,
+*top* and *overlay* above them. Nothing from any layer is shown over the lock
+screen.
+
+The usable area
+---------------
+
+Each output keeps a **usable area**: the box left over once the space other
+things have reserved is taken out of it. It is derived, in order, as the full
+output, minus the top bar's strip, minus the *exclusive zone* of every layer
+surface mapped on that output.
+
+That box is what **hikari** lays views out in. Layouts are applied to it, named
+view positions (*center*, *top-right*, ...) are resolved against it, and
+**workspace-cycle-\[next|prev\]** parks the pointer in its centre when the
+workspace it arrives at has nothing to focus -- so a tiled window is never
+placed under a panel, and a centred window is centred in what is actually
+visible.
+
+A surface with a zero exclusive zone -- what an overlay launcher such as
+**sofi** uses, and what a wallpaper setter uses -- reserves nothing and draws
+over the layout on purpose.
+
+Re-tiling when the reserved space changes
+-----------------------------------------
+
+A panel starting, exiting, growing, hiding on autohide or moving to another
+output all change that output's usable area. The sheet displayed there is then
+laid out against a box that no longer exists, so the compositor requests a
+re-tile for it, in exactly the same way it does when an output is moved or
+changes mode.
+
+The request goes through the ordinary reflow path described under **LAYOUT
+POLICY**, which means it is subject to the same rules: it happens only when
+*layout* *auto* is set, it is deferred until the sheet is quiet, it is held for
+the duration of a pointer drag, and it is dropped while the screen is locked.
+With *auto* unset nothing is moved on its own -- tiled views keep the geometry
+they had, which may now be underneath the panel, until **layout-restack-append**
+or a layout action is issued.
+
+Floating views are never re-tiled, by definition, so a floating view can end up
+beneath a panel that appeared after it.
+
+Keyboard focus
+--------------
+
+Focus follows the mouse, but a layer surface only takes the keyboard if it asks
+for it. A panel that requests *keyboard\_interactivity none* -- the normal
+setting for a bar or a dock -- is hovered and clicked without the keyboard or
+the active workspace moving anywhere, so pointing at a panel on a second monitor
+does not redirect the keys or the view-cycling actions to that monitor. A
+surface that requests the keyboard does move both, which is what a panel's own
+menu wants.
+
+*keyboard\_interactivity on\_demand* is currently treated as *exclusive* rather
+than as click-to-focus: such a surface is given the keyboard while the pointer
+is over it. This affects panels that open keyboard-driven menus and nothing
+else.
 
 TOP BAR
 =======

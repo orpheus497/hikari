@@ -12,6 +12,7 @@
 
 #include <hikari/memory.h>
 #include <hikari/output.h>
+#include <hikari/reflow.h>
 #include <hikari/server.h>
 
 static void
@@ -52,6 +53,9 @@ arrange_layers(struct hikari_output *output);
 
 static bool
 layer_inputs_changed(struct hikari_layer *layer);
+
+static bool
+refresh_geometry(struct hikari_layer *layer);
 
 static bool
 init_layer_popup(struct hikari_layer_popup *layer_popup,
@@ -231,8 +235,6 @@ arrange_layers(struct hikari_output *output)
         continue;
       }
 
-      struct wlr_box old_geometry = layer->geometry;
-
       /* [COMMENT] Action purpose: wlr_scene_layer_surface_v1_configure() reads
       from layer_surface->current (the committed state, set by wlroots after the
       initial commit). It computes geometry from anchor/margin/desired_size,
@@ -243,42 +245,11 @@ arrange_layers(struct hikari_output *output)
       wlr_scene_layer_surface_v1_configure(
           layer->scene_layer_surface, &full_area, &usable_area);
 
-      /* [COMMENT] Action purpose: After the scene configure call, derive the
-      output-local geometry from the scene node's layout-global position.
-      wlr_scene_node_coords() returns layout-global coordinates; subtract the
-      output's layout origin to get output-local. */
-      int nx = 0, ny = 0;
-      wlr_scene_node_coords(&layer->scene_layer_surface->tree->node, &nx, &ny);
-      layer->geometry.x = nx - output->geometry.x;
-      layer->geometry.y = ny - output->geometry.y;
-
-      /* [COMMENT] Action purpose: actual_width/height are populated in the
-      layer surface state after the client acks the configure. On the very first
-      configure they are still zero; fall back to desired size for the initial
-      geometry tracking so popup_unconstrain has valid dimensions. */
-      struct wlr_layer_surface_v1_state *state =
-          &layer->scene_layer_surface->layer_surface->current;
-      layer->geometry.width = state->actual_width > 0
-                                  ? (int)state->actual_width
-                                  : (int)state->desired_width;
-      layer->geometry.height = state->actual_height > 0
-                                   ? (int)state->actual_height
-                                   : (int)state->desired_height;
-
-      /* [COMMENT] Action purpose: Damage the old and new geometry rectangles
-      when a mapped surface has moved or resized so the scene repaint fires. */
-      bool geo_changed =
-          memcmp(&old_geometry, &layer->geometry, sizeof(struct wlr_box)) != 0;
-      if (geo_changed && layer->mapped && output->enabled) {
-        hikari_output_add_damage(output, &old_geometry);
-        hikari_output_add_damage(output, &layer->geometry);
-      }
-
       /* Action purpose: Accumulate across every layer, not just the one that
       prompted this pass. One surface's exclusive zone shrinks usable_area for
       the surfaces configured after it, so a commit on a bar can move a menu
       that never committed at all. */
-      arrangement_changed |= geo_changed;
+      arrangement_changed |= refresh_geometry(layer);
     }
   }
 
@@ -289,9 +260,74 @@ arrange_layers(struct hikari_output *output)
   usable_area.x -= output->geometry.x;
   usable_area.y -= output->geometry.y;
 
-  output->usable_area = usable_area;
+  /* Action purpose: A changed usable area invalidates the box every tiled view
+  on this output was laid out against, exactly as an output move or mode change
+  does, so it earns the same idempotent reflow request
+  output_layout_change_handler makes. This is tracked separately from
+  arrangement_changed because the two are independent: a bar can grow its
+  exclusive zone without any layer surface moving, and layer surfaces can move
+  without a single exclusive zone changing. Requesting it here rather than at
+  each caller is what makes it impossible for one arrangement path -- initial
+  commit, mapped commit, map, unmap, output layout change -- to forget it. */
+  if (memcmp(&output->usable_area, &usable_area, sizeof(struct wlr_box)) != 0) {
+    output->usable_area = usable_area;
+
+    if (output->workspace != NULL) {
+      hikari_reflow_schedule(output->workspace->sheet);
+    }
+  }
 
   return arrangement_changed;
+}
+
+/* Function purpose: Re-derive one layer's cached output-local geometry from its
+scene node and its committed size, damaging the old and the new rectangle when
+they differ. Returns whether anything moved or resized.
+
+Action purpose: Shared by the arrangement pass and by the mapped-commit path,
+which needs exactly this refresh WITHOUT sending a configure. A client's ack of
+an earlier configure arrives as an ordinary commit carrying the settled
+actual_width/actual_height, and re-arranging to pick that up would answer the
+ack with another configure -- the loop the commit guard exists to prevent. */
+static bool
+refresh_geometry(struct hikari_layer *layer)
+{
+  assert(layer->scene_layer_surface != NULL);
+
+  struct hikari_output *output = layer->output;
+  struct wlr_box old_geometry = layer->geometry;
+
+  /* [COMMENT] Action purpose: Derive the output-local geometry from the scene
+  node's layout-global position. wlr_scene_node_coords() returns layout-global
+  coordinates; subtract the output's layout origin to get output-local. */
+  int nx = 0, ny = 0;
+  wlr_scene_node_coords(&layer->scene_layer_surface->tree->node, &nx, &ny);
+  layer->geometry.x = nx - output->geometry.x;
+  layer->geometry.y = ny - output->geometry.y;
+
+  /* [COMMENT] Action purpose: actual_width/height are populated in the layer
+  surface state after the client acks the configure. On the very first configure
+  they are still zero; fall back to desired size for the initial geometry
+  tracking so popup_unconstrain has valid dimensions. */
+  struct wlr_layer_surface_v1_state *state =
+      &layer->scene_layer_surface->layer_surface->current;
+  layer->geometry.width = state->actual_width > 0 ? (int)state->actual_width
+                                                  : (int)state->desired_width;
+  layer->geometry.height = state->actual_height > 0
+                               ? (int)state->actual_height
+                               : (int)state->desired_height;
+
+  /* [COMMENT] Action purpose: Damage the old and new geometry rectangles when a
+  mapped surface has moved or resized so the scene repaint fires. */
+  bool geo_changed =
+      memcmp(&old_geometry, &layer->geometry, sizeof(struct wlr_box)) != 0;
+
+  if (geo_changed && layer->mapped && output->enabled) {
+    hikari_output_add_damage(output, &old_geometry);
+    hikari_output_add_damage(output, &layer->geometry);
+  }
+
+  return geo_changed;
 }
 
 /* Function purpose: Re-run the arrangement for one output after its geometry
@@ -690,6 +726,15 @@ commit_handler(struct wl_listener *listener, void *data)
   hang indefinitely waiting for the configure reply. */
   if (!layer->configured) {
     layer->configured = true;
+
+    /* Action purpose: Seed the arrangement cache from this first committed
+    state before arranging, so the next commit is compared against what this
+    arrangement was actually built from. Left unseeded, every field the client
+    set before its first commit reads as a change on the second commit and buys
+    a needless configure. The arrangement itself reads surface->current
+    directly, so adopting the values first cannot alter what it computes. */
+    (void)layer_inputs_changed(layer);
+
     arrange_layers(output);
     return;
   }
@@ -740,6 +785,16 @@ commit_handler(struct wl_listener *listener, void *data)
   }
 
   if (!inputs_changed) {
+    /* Action purpose: A client's ack of an earlier configure lands here as an
+    ordinary commit -- nothing the arrangement reads has changed, but
+    current.actual_width/actual_height now carry the size the client settled on,
+    which is what surface_at() hit-tests against and what popup_unconstrain()
+    measures from. Refresh the cached geometry in place and re-resolve the
+    pointer; issuing another configure instead is precisely the loop the guard
+    above exists to prevent. */
+    if (layer->scene_layer_surface != NULL && refresh_geometry(layer)) {
+      hikari_server_cursor_focus();
+    }
     return;
   }
 
