@@ -1043,6 +1043,27 @@ setup_scene_graph(struct hikari_server *server)
     wlr_scene_node_raise_to_top(&(*layers[i])->node);
   }
 
+  /* [COMMENT] Action purpose: Split the fullscreen band into two ordered
+  children. wlr_scene_node_reparent() inserts at the top of the new parent, so
+  with one flat tree a view entering fullscreen lands above an X11 menu already
+  raised there -- drawn underneath it while node_at() still hit-tests the menu
+  first, which is the invisible-but-clickable pathology P-03 removed. Unmanaged
+  sits above views, matching that hit-test order. */
+  server->layers.fullscreen_views =
+      wlr_scene_tree_create(server->layers.fullscreen);
+  server->layers.fullscreen_unmanaged =
+      wlr_scene_tree_create(server->layers.fullscreen);
+
+  if (server->layers.fullscreen_views == NULL ||
+      server->layers.fullscreen_unmanaged == NULL) {
+    fprintf(stderr, "error: could not create fullscreen scene layers\n");
+    wl_display_destroy(server->display);
+    exit(EXIT_FAILURE);
+  }
+
+  wlr_scene_node_raise_to_top(&server->layers.fullscreen_views->node);
+  wlr_scene_node_raise_to_top(&server->layers.fullscreen_unmanaged->node);
+
   /* [COMMENT] Action purpose: The lock layer stays disabled for the whole of a
   normal session; hikari_lock_mode_enter() swaps it in. Creating it up front
   rather than on demand means lock mode never has to allocate at the moment it

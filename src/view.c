@@ -667,7 +667,7 @@ refresh_scene_layer(struct hikari_view *view)
   if (hikari_server_in_lock_mode() && hikari_view_is_public(view)) {
     layer = hikari_server.layers.lock;
   } else if (hikari_view_is_fullscreen(view)) {
-    layer = hikari_server.layers.fullscreen;
+    layer = hikari_server.layers.fullscreen_views;
   } else {
     layer = hikari_server.layers.views;
   }

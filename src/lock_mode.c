@@ -703,8 +703,9 @@ reset_visibility(void)
       exactly. */
       if (view->scene_node != NULL) {
         wlr_scene_node_reparent(view->scene_node,
-            hikari_view_is_fullscreen(view) ? hikari_server.layers.fullscreen
-                                            : hikari_server.layers.views);
+            hikari_view_is_fullscreen(view)
+                ? hikari_server.layers.fullscreen_views
+                : hikari_server.layers.views);
         wlr_scene_node_set_enabled(
             view->scene_node, !hikari_view_is_hidden(view));
       }
