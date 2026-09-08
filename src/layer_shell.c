@@ -1051,6 +1051,21 @@ focus(struct hikari_node *node)
   compositor believing the other screen was still active. */
   struct hikari_workspace *workspace = layer->output->workspace;
 
+  /* Action purpose: Only a surface that takes the keyboard may move the active
+  workspace, because moving it is how the rest of the compositor is told where
+  the keyboard went. A bar that wants no keyboard is hovered without any seat
+  focus changing, so reassigning the workspace for it pointed
+  hikari_server.workspace at one output while the seat, and the previous
+  workspace's focus_view, stayed on another. L+Tab reads focus_view through
+  hikari_server.workspace, so it then cycled the views of the output the user was
+  not typing on.
+
+  This is narrower than it looks: the bar and the menu of the original bug are
+  typically one surface that raises its keyboard interactivity while a menu is
+  open and drops it again after, so the case that wants this assignment still
+  gets it -- just at the moment the keyboard actually moves, rather than on every
+  hover and every repaint. */
+
   if (state->keyboard_interactive) {
     struct hikari_workspace *focused = hikari_server.workspace;
     struct wlr_seat *seat = hikari_server.seat;
@@ -1076,9 +1091,9 @@ focus(struct hikari_node *node)
     }
 
     workspace->focus_layer = layer;
-  }
 
-  hikari_server.workspace = workspace;
+    hikari_server.workspace = workspace;
+  }
 }
 
 static void
