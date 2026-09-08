@@ -98,8 +98,16 @@ struct hikari_server {
     struct wlr_scene_tree *bottom;
     struct wlr_scene_tree *views;
     struct wlr_scene_tree *top;
+    struct wlr_scene_tree *fullscreen;
     struct wlr_scene_tree *overlay;
     struct wlr_scene_tree *lock;
+
+    /* Children of `fullscreen`, not bands of their own. A reparent lands a node
+    at the top of its new parent, so views and override-redirect surfaces
+    sharing one tree let a view entering fullscreen climb over a menu already
+    raised there. Separate trees make that order structural. */
+    struct wlr_scene_tree *fullscreen_views;
+    struct wlr_scene_tree *fullscreen_unmanaged;
   } layers;
   struct wlr_xdg_output_manager_v1 *output_manager;
   struct wlr_data_device_manager *data_device_manager;

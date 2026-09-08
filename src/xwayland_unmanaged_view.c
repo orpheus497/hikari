@@ -112,11 +112,11 @@ map_unmanaged(
   wl_list_insert(&output->unmanaged_xwayland_views,
       &xwayland_unmanaged_view->unmanaged_output_views);
 
-  /* [COMMENT] Action purpose: Show it, and put it above the windows already in
-  the view layer -- an override-redirect surface is a menu, tooltip or drag
-  icon, which is only ever meaningful on top of whatever spawned it. Raising is
-  scoped to the view layer, so this cannot climb over the bar or the lock
-  screen. */
+  /* [COMMENT] Action purpose: Show it, and put it above the other unmanaged
+  surfaces -- an override-redirect surface is a menu, tooltip or drag icon,
+  which is only ever meaningful on top of whatever spawned it. Raising is scoped
+  to the unmanaged child tree, so this cannot climb over OVERLAY or the lock
+  screen, and it no longer has to outrun views entering fullscreen. */
   if (xwayland_unmanaged_view->surface_tree != NULL) {
     position_surface_tree(xwayland_unmanaged_view);
     wlr_scene_node_set_enabled(
@@ -380,15 +380,14 @@ attach_surface_listeners_unmanaged(
   this file ever did, which is why X11 menus, tooltips and dropdowns were
   hit-tested but invisible.
 
-  Parented to the view layer rather than the overlay layer deliberately: these
-  belong to a client, so they should sit above other windows but still below
-  the compositor's own bar and indicators -- an application menu covering the
-  top bar would be wrong. Starts disabled and is enabled by the map path, which
-  is also what keeps it hidden while the screen is locked, since the whole view
-  layer is disabled then. */
+  Parented to the unmanaged child of the fullscreen band, which sits above the
+  child holding the views themselves, so a menu belonging to a fullscreen window
+  is not buried under it. Starts disabled and is enabled by the map path, which
+  is also what keeps it hidden while the screen is locked, since the band is
+  disabled then and that disables both children. */
   if (xwayland_unmanaged_view->surface_tree == NULL) {
     xwayland_unmanaged_view->surface_tree = wlr_scene_subsurface_tree_create(
-        hikari_server.layers.views, xwayland_surface->surface);
+        hikari_server.layers.fullscreen_unmanaged, xwayland_surface->surface);
 
     if (xwayland_unmanaged_view->surface_tree != NULL) {
       wlr_scene_node_set_enabled(

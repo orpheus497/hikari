@@ -671,6 +671,7 @@ reset_visibility(void)
   wlr_scene_node_set_enabled(&hikari_server.layers.bottom->node, true);
   wlr_scene_node_set_enabled(&hikari_server.layers.views->node, true);
   wlr_scene_node_set_enabled(&hikari_server.layers.top->node, true);
+  wlr_scene_node_set_enabled(&hikari_server.layers.fullscreen->node, true);
   wlr_scene_node_set_enabled(&hikari_server.layers.overlay->node, true);
 
   struct hikari_output *output;
@@ -701,7 +702,10 @@ reset_visibility(void)
       either -- so deriving one from the other reproduces the pre-lock state
       exactly. */
       if (view->scene_node != NULL) {
-        wlr_scene_node_reparent(view->scene_node, hikari_server.layers.views);
+        wlr_scene_node_reparent(view->scene_node,
+            hikari_view_is_fullscreen(view)
+                ? hikari_server.layers.fullscreen_views
+                : hikari_server.layers.views);
         wlr_scene_node_set_enabled(
             view->scene_node, !hikari_view_is_hidden(view));
       }
@@ -988,6 +992,7 @@ override_visibility(void)
   wlr_scene_node_set_enabled(&hikari_server.layers.bottom->node, false);
   wlr_scene_node_set_enabled(&hikari_server.layers.views->node, false);
   wlr_scene_node_set_enabled(&hikari_server.layers.top->node, false);
+  wlr_scene_node_set_enabled(&hikari_server.layers.fullscreen->node, false);
   wlr_scene_node_set_enabled(&hikari_server.layers.overlay->node, false);
   wlr_scene_node_set_enabled(&hikari_server.layers.lock->node, true);
 }

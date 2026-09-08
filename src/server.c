@@ -492,6 +492,29 @@ node_at(double lx,
   }
 #endif
 
+  struct hikari_view *fullscreen_view = NULL;
+  wl_list_for_each (
+      fullscreen_view, &output_workspace->views, workspace_views) {
+    if (!hikari_view_is_fullscreen(fullscreen_view)) {
+      continue;
+    }
+
+    node = (struct hikari_node *)fullscreen_view;
+
+    int fullscreen_dx;
+    int fullscreen_dy;
+    hikari_animation_offset(fullscreen_view, &fullscreen_dx, &fullscreen_dy);
+
+    if (surface_at(node,
+            lx - output->geometry.x - fullscreen_dx,
+            ly - output->geometry.y - fullscreen_dy,
+            surface,
+            sx,
+            sy)) {
+      return node;
+    }
+  }
+
 #ifdef HAVE_LAYERSHELL
   if (layer_at(&output->layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP],
           lx - output->geometry.x,
@@ -506,6 +529,10 @@ node_at(double lx,
 
   struct hikari_view *view = NULL;
   wl_list_for_each (view, &output_workspace->views, workspace_views) {
+    if (hikari_view_is_fullscreen(view)) {
+      continue;
+    }
+
     node = (struct hikari_node *)view;
 
     /* [COMMENT] Action purpose: Hit-test against where the window is DRAWN, not
@@ -979,7 +1006,7 @@ setup_scene_graph(struct hikari_server *server)
     exit(EXIT_FAILURE);
   }
 
-  /* [COMMENT] Action purpose: Create the six stacking layers everything else
+  /* [COMMENT] Action purpose: Create the seven stacking layers everything else
   attaches to. Nothing may parent itself to server->scene->tree directly after
   this point -- that is what reintroduces the flat list these replace. */
   struct wlr_scene_tree **layers[] = {
@@ -987,6 +1014,7 @@ setup_scene_graph(struct hikari_server *server)
     &server->layers.bottom,
     &server->layers.views,
     &server->layers.top,
+    &server->layers.fullscreen,
     &server->layers.overlay,
     &server->layers.lock,
   };
@@ -1014,6 +1042,27 @@ setup_scene_graph(struct hikari_server *server)
   for (size_t i = 0; i < layer_count; i++) {
     wlr_scene_node_raise_to_top(&(*layers[i])->node);
   }
+
+  /* [COMMENT] Action purpose: Split the fullscreen band into two ordered
+  children. wlr_scene_node_reparent() inserts at the top of the new parent, so
+  with one flat tree a view entering fullscreen lands above an X11 menu already
+  raised there -- drawn underneath it while node_at() still hit-tests the menu
+  first, which is the invisible-but-clickable pathology P-03 removed. Unmanaged
+  sits above views, matching that hit-test order. */
+  server->layers.fullscreen_views =
+      wlr_scene_tree_create(server->layers.fullscreen);
+  server->layers.fullscreen_unmanaged =
+      wlr_scene_tree_create(server->layers.fullscreen);
+
+  if (server->layers.fullscreen_views == NULL ||
+      server->layers.fullscreen_unmanaged == NULL) {
+    fprintf(stderr, "error: could not create fullscreen scene layers\n");
+    wl_display_destroy(server->display);
+    exit(EXIT_FAILURE);
+  }
+
+  wlr_scene_node_raise_to_top(&server->layers.fullscreen_views->node);
+  wlr_scene_node_raise_to_top(&server->layers.fullscreen_unmanaged->node);
 
   /* [COMMENT] Action purpose: The lock layer stays disabled for the whole of a
   normal session; hikari_lock_mode_enter() swaps it in. Creating it up front
