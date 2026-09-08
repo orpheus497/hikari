@@ -12,6 +12,7 @@
 
 #include <hikari/memory.h>
 #include <hikari/output.h>
+#include <hikari/reflow.h>
 #include <hikari/server.h>
 
 static void
@@ -47,8 +48,14 @@ surface_at(
 static void
 focus(struct hikari_node *node);
 
-static void
+static bool
 arrange_layers(struct hikari_output *output);
+
+static bool
+layer_inputs_changed(struct hikari_layer *layer);
+
+static bool
+refresh_geometry(struct hikari_layer *layer);
 
 static bool
 init_layer_popup(struct hikari_layer_popup *layer_popup,
@@ -114,16 +121,72 @@ new_popup_popup_handler(struct wl_listener *listener, void *data);
 static struct hikari_layer *
 get_layer(struct hikari_layer_popup *popup);
 
+/* Function purpose: Answer whether this commit changed anything arrange_layers()
+depends on, and adopt the new values if so. Every caller that is deciding
+whether to re-arrange asks this and nothing else.
+
+Action purpose: The compared set is exactly the state arrange_layers() feeds to
+wlr_scene_layer_surface_v1_configure() -- anchor, margin, desired size,
+exclusive zone, exclusive edge, layer. It has to be exhaustive in both
+directions: a field the arrangement reads but this ignores leaves the surface
+stuck at a stale size, and a field this compares but the arrangement ignores
+costs a needless configure. wlroots 0.20 never deduplicates a configure of its
+own accord (it writes current.actual_* on ack but never reads them back for
+comparison), so this function is the only thing standing between a repainting
+panel and an unbounded configure/commit loop. */
+static bool
+layer_inputs_changed(struct hikari_layer *layer)
+{
+  struct wlr_layer_surface_v1_state *state = &layer->surface->current;
+
+  if (layer->desired_width == state->desired_width &&
+      layer->desired_height == state->desired_height &&
+      layer->anchor == state->anchor &&
+      layer->margin.top == state->margin.top &&
+      layer->margin.right == state->margin.right &&
+      layer->margin.bottom == state->margin.bottom &&
+      layer->margin.left == state->margin.left &&
+      layer->exclusive_zone == state->exclusive_zone &&
+      layer->exclusive_edge == state->exclusive_edge &&
+      layer->layer == state->layer) {
+    return false;
+  }
+
+  layer->desired_width = state->desired_width;
+  layer->desired_height = state->desired_height;
+  layer->anchor = state->anchor;
+  layer->margin.top = state->margin.top;
+  layer->margin.right = state->margin.right;
+  layer->margin.bottom = state->margin.bottom;
+  layer->margin.left = state->margin.left;
+  layer->exclusive_zone = state->exclusive_zone;
+  layer->exclusive_edge = state->exclusive_edge;
+
+  /* Action purpose: layer->layer is deliberately NOT adopted here. It doubles as
+  the identity of the per-layer list this surface is linked into, and the caller
+  has to unlink, relink and reparent the scene node before it may be updated.
+  commit_handler owns that move; this function only reports the disagreement. */
+
+  return true;
+}
+
 /* [COMMENT] Function purpose: Arrange all layer surfaces for a given output
 using wlr_scene_layer_surface_v1_configure(), which handles geometry
 computation, scene node positioning, wlr_layer_surface_v1_configure() dispatch,
 and exclusive zone tracking in a single correct call. Updates
 output->usable_area for views. Must only be called AFTER the surface's
-initial_commit (initialized == true). */
-static void
+initial_commit (initialized == true).
+
+Returns whether any surface's geometry actually moved or resized. Callers use
+that to decide whether anything downstream of the arrangement needs to re-run --
+in particular the pointer hit test, which has no work to do when the scene did
+not change. */
+static bool
 arrange_layers(struct hikari_output *output)
 {
   assert(output != NULL);
+
+  bool arrangement_changed = false;
 
   /* [COMMENT] Action purpose: The box handed to
   wlr_scene_layer_surface_v1_configure() must be expressed in the coordinate
@@ -172,8 +235,6 @@ arrange_layers(struct hikari_output *output)
         continue;
       }
 
-      struct wlr_box old_geometry = layer->geometry;
-
       /* [COMMENT] Action purpose: wlr_scene_layer_surface_v1_configure() reads
       from layer_surface->current (the committed state, set by wlroots after the
       initial commit). It computes geometry from anchor/margin/desired_size,
@@ -184,36 +245,11 @@ arrange_layers(struct hikari_output *output)
       wlr_scene_layer_surface_v1_configure(
           layer->scene_layer_surface, &full_area, &usable_area);
 
-      /* [COMMENT] Action purpose: After the scene configure call, derive the
-      output-local geometry from the scene node's layout-global position.
-      wlr_scene_node_coords() returns layout-global coordinates; subtract the
-      output's layout origin to get output-local. */
-      int nx = 0, ny = 0;
-      wlr_scene_node_coords(&layer->scene_layer_surface->tree->node, &nx, &ny);
-      layer->geometry.x = nx - output->geometry.x;
-      layer->geometry.y = ny - output->geometry.y;
-
-      /* [COMMENT] Action purpose: actual_width/height are populated in the
-      layer surface state after the client acks the configure. On the very first
-      configure they are still zero; fall back to desired size for the initial
-      geometry tracking so popup_unconstrain has valid dimensions. */
-      struct wlr_layer_surface_v1_state *state =
-          &layer->scene_layer_surface->layer_surface->current;
-      layer->geometry.width = state->actual_width > 0
-                                  ? (int)state->actual_width
-                                  : (int)state->desired_width;
-      layer->geometry.height = state->actual_height > 0
-                                   ? (int)state->actual_height
-                                   : (int)state->desired_height;
-
-      /* [COMMENT] Action purpose: Damage the old and new geometry rectangles
-      when a mapped surface has moved or resized so the scene repaint fires. */
-      bool geo_changed =
-          memcmp(&old_geometry, &layer->geometry, sizeof(struct wlr_box)) != 0;
-      if (geo_changed && layer->mapped && output->enabled) {
-        hikari_output_add_damage(output, &old_geometry);
-        hikari_output_add_damage(output, &layer->geometry);
-      }
+      /* Action purpose: Accumulate across every layer, not just the one that
+      prompted this pass. One surface's exclusive zone shrinks usable_area for
+      the surfaces configured after it, so a commit on a bar can move a menu
+      that never committed at all. */
+      arrangement_changed |= refresh_geometry(layer);
     }
   }
 
@@ -224,7 +260,74 @@ arrange_layers(struct hikari_output *output)
   usable_area.x -= output->geometry.x;
   usable_area.y -= output->geometry.y;
 
-  output->usable_area = usable_area;
+  /* Action purpose: A changed usable area invalidates the box every tiled view
+  on this output was laid out against, exactly as an output move or mode change
+  does, so it earns the same idempotent reflow request
+  output_layout_change_handler makes. This is tracked separately from
+  arrangement_changed because the two are independent: a bar can grow its
+  exclusive zone without any layer surface moving, and layer surfaces can move
+  without a single exclusive zone changing. Requesting it here rather than at
+  each caller is what makes it impossible for one arrangement path -- initial
+  commit, mapped commit, map, unmap, output layout change -- to forget it. */
+  if (memcmp(&output->usable_area, &usable_area, sizeof(struct wlr_box)) != 0) {
+    output->usable_area = usable_area;
+
+    if (output->workspace != NULL) {
+      hikari_reflow_schedule(output->workspace->sheet);
+    }
+  }
+
+  return arrangement_changed;
+}
+
+/* Function purpose: Re-derive one layer's cached output-local geometry from its
+scene node and its committed size, damaging the old and the new rectangle when
+they differ. Returns whether anything moved or resized.
+
+Action purpose: Shared by the arrangement pass and by the mapped-commit path,
+which needs exactly this refresh WITHOUT sending a configure. A client's ack of
+an earlier configure arrives as an ordinary commit carrying the settled
+actual_width/actual_height, and re-arranging to pick that up would answer the
+ack with another configure -- the loop the commit guard exists to prevent. */
+static bool
+refresh_geometry(struct hikari_layer *layer)
+{
+  assert(layer->scene_layer_surface != NULL);
+
+  struct hikari_output *output = layer->output;
+  struct wlr_box old_geometry = layer->geometry;
+
+  /* [COMMENT] Action purpose: Derive the output-local geometry from the scene
+  node's layout-global position. wlr_scene_node_coords() returns layout-global
+  coordinates; subtract the output's layout origin to get output-local. */
+  int nx = 0, ny = 0;
+  wlr_scene_node_coords(&layer->scene_layer_surface->tree->node, &nx, &ny);
+  layer->geometry.x = nx - output->geometry.x;
+  layer->geometry.y = ny - output->geometry.y;
+
+  /* [COMMENT] Action purpose: actual_width/height are populated in the layer
+  surface state after the client acks the configure. On the very first configure
+  they are still zero; fall back to desired size for the initial geometry
+  tracking so popup_unconstrain has valid dimensions. */
+  struct wlr_layer_surface_v1_state *state =
+      &layer->scene_layer_surface->layer_surface->current;
+  layer->geometry.width = state->actual_width > 0 ? (int)state->actual_width
+                                                  : (int)state->desired_width;
+  layer->geometry.height = state->actual_height > 0
+                               ? (int)state->actual_height
+                               : (int)state->desired_height;
+
+  /* [COMMENT] Action purpose: Damage the old and new geometry rectangles when a
+  mapped surface has moved or resized so the scene repaint fires. */
+  bool geo_changed =
+      memcmp(&old_geometry, &layer->geometry, sizeof(struct wlr_box)) != 0;
+
+  if (geo_changed && layer->mapped && output->enabled) {
+    hikari_output_add_damage(output, &old_geometry);
+    hikari_output_add_damage(output, &layer->geometry);
+  }
+
+  return geo_changed;
 }
 
 /* Function purpose: Re-run the arrangement for one output after its geometry
@@ -283,6 +386,8 @@ hikari_layer_init(
   layer->margin.right = 0;
   layer->margin.bottom = 0;
   layer->margin.left = 0;
+  layer->exclusive_zone = 0;
+  layer->exclusive_edge = 0;
 
   wlr_layer_surface->output = output->wlr_output;
 
@@ -621,29 +726,24 @@ commit_handler(struct wl_listener *listener, void *data)
   hang indefinitely waiting for the configure reply. */
   if (!layer->configured) {
     layer->configured = true;
+
+    /* Action purpose: Seed the arrangement cache from this first committed
+    state before arranging, so the next commit is compared against what this
+    arrangement was actually built from. Left unseeded, every field the client
+    set before its first commit reads as a change on the second commit and buys
+    a needless configure. The arrangement itself reads surface->current
+    directly, so adopting the values first cannot alter what it computes. */
+    (void)layer_inputs_changed(layer);
+
     arrange_layers(output);
     return;
   }
 
   if (!layer->mapped) {
     /* [COMMENT] Action purpose: Client committed again before mapping.
-    Avoid infinite configure loops by only re-arranging if the desired size
-    or anchor actually changed. */
-    struct wlr_layer_surface_v1_state *state = &layer->surface->current;
-    if (layer->desired_width != state->desired_width ||
-        layer->desired_height != state->desired_height ||
-        layer->anchor != state->anchor ||
-        layer->margin.top != state->margin.top ||
-        layer->margin.right != state->margin.right ||
-        layer->margin.bottom != state->margin.bottom ||
-        layer->margin.left != state->margin.left) {
-      layer->desired_width = state->desired_width;
-      layer->desired_height = state->desired_height;
-      layer->anchor = state->anchor;
-      layer->margin.top = state->margin.top;
-      layer->margin.right = state->margin.right;
-      layer->margin.bottom = state->margin.bottom;
-      layer->margin.left = state->margin.left;
+    Avoid infinite configure loops by only re-arranging if something the
+    arrangement depends on actually changed. */
+    if (layer_inputs_changed(layer)) {
       arrange_layers(output);
     }
     return;
@@ -653,6 +753,21 @@ commit_handler(struct wl_listener *listener, void *data)
   Check whether the layer changed (client called set_layer) and move it to
   the correct list if so, adjusting scene z-order. Then re-arrange all layers
   so exclusive zones and positions are recalculated. */
+  /* Action purpose: Ask once, up front, whether this commit touched anything the
+  arrangement reads -- and adopt the new values while asking, so the question is
+  answered the same way on the next commit. Everything below is conditional on
+  the answer.
+
+  Re-arranging unconditionally here is what turned a repainting panel into a
+  self-sustaining loop: wlroots sends a configure on every
+  wlr_scene_layer_surface_v1_configure() call whether or not the box changed, the
+  client answers each configure with a commit, and this handler answers each
+  commit with another configure. A panel that repaints at its display's rate
+  therefore pinned a core in the client and a quarter of one here, with the size
+  identical on every pass. Nothing downstream of an unchanged commit has any work
+  to do. */
+  bool inputs_changed = layer_inputs_changed(layer);
+
   enum zwlr_layer_shell_v1_layer current_layer = layer->surface->current.layer;
   bool changed_layer = layer->layer != current_layer;
 
@@ -669,8 +784,32 @@ commit_handler(struct wl_listener *listener, void *data)
         layer_scene_tree(current_layer));
   }
 
-  arrange_layers(output);
-  hikari_server_cursor_focus();
+  if (!inputs_changed) {
+    /* Action purpose: A client's ack of an earlier configure lands here as an
+    ordinary commit -- nothing the arrangement reads has changed, but
+    current.actual_width/actual_height now carry the size the client settled on,
+    which is what surface_at() hit-tests against and what popup_unconstrain()
+    measures from. Refresh the cached geometry in place and re-resolve the
+    pointer; issuing another configure instead is precisely the loop the guard
+    above exists to prevent. */
+    if (layer->scene_layer_surface != NULL && refresh_geometry(layer)) {
+      hikari_server_cursor_focus();
+    }
+    return;
+  }
+
+  /* Action purpose: Re-run the pointer hit test only when the arrangement
+  actually moved something. hikari_server_cursor_focus() re-asserts
+  focus-follows-mouse at wherever the cursor is resting, which has nothing to do
+  with which surface committed -- so calling it on every layer commit let a panel
+  repaint reach across and overwrite a keyboard-driven focus with whatever
+  happened to be under the pointer. That is worth guarding at any repaint rate: a
+  clock ticking once a second is enough to make L+Tab useless. When no geometry
+  moved there is no new surface under the cursor, so there is nothing to
+  re-resolve. */
+  if (arrange_layers(output)) {
+    hikari_server_cursor_focus();
+  }
 }
 
 static void
@@ -733,6 +872,17 @@ map(struct hikari_layer *layer)
   }
 
   damage(layer, true);
+
+  /* Action purpose: Reserve this surface's exclusive zone now that it counts.
+  wlroots only subtracts a surface's zone from usable_area while its wl_surface
+  is mapped, and it raises the map signal from inside the role commit -- before
+  the wl_surface commit signal this compositor arranges from. Every arrangement
+  before this point therefore ran with the surface still unmapped and its zone
+  ignored, so without re-running it here a panel's strip is never reserved and
+  views tile straight underneath it. This used to be masked by the mapped commit
+  path re-arranging unconditionally; that path is now guarded, so the
+  reservation has to happen where it is actually earned. */
+  arrange_layers(layer->output);
 
   hikari_server_cursor_focus();
 }
@@ -956,6 +1106,21 @@ focus(struct hikari_node *node)
   compositor believing the other screen was still active. */
   struct hikari_workspace *workspace = layer->output->workspace;
 
+  /* Action purpose: Only a surface that takes the keyboard may move the active
+  workspace, because moving it is how the rest of the compositor is told where
+  the keyboard went. A bar that wants no keyboard is hovered without any seat
+  focus changing, so reassigning the workspace for it pointed
+  hikari_server.workspace at one output while the seat, and the previous
+  workspace's focus_view, stayed on another. L+Tab reads focus_view through
+  hikari_server.workspace, so it then cycled the views of the output the user was
+  not typing on.
+
+  This is narrower than it looks: the bar and the menu of the original bug are
+  typically one surface that raises its keyboard interactivity while a menu is
+  open and drops it again after, so the case that wants this assignment still
+  gets it -- just at the moment the keyboard actually moves, rather than on every
+  hover and every repaint. */
+
   if (state->keyboard_interactive) {
     struct hikari_workspace *focused = hikari_server.workspace;
     struct wlr_seat *seat = hikari_server.seat;
@@ -981,9 +1146,9 @@ focus(struct hikari_node *node)
     }
 
     workspace->focus_layer = layer;
-  }
 
-  hikari_server.workspace = workspace;
+    hikari_server.workspace = workspace;
+  }
 }
 
 static void

@@ -49,11 +49,23 @@ struct hikari_layer {
   bool mapped;
   bool configured;
 
+  /* [COMMENT] Class purpose: Cached copy of every field of
+  wlr_layer_surface_v1::current that arrange_layers() feeds to
+  wlr_scene_layer_surface_v1_configure(). Their only job is to answer "did this
+  commit change anything the arrangement depends on?", because wlroots 0.20
+  sends a configure unconditionally -- it never compares the computed box
+  against current.actual_width/actual_height -- so re-arranging on an unchanged
+  commit hands the client a fresh configure, which it answers with another
+  commit, at whatever rate it can render. The set must stay exhaustive: a field
+  read by the arrangement but missing here leaves a surface stuck at a stale
+  size. See layer_inputs_changed() in src/layer_shell.c. */
   uint32_t desired_width, desired_height;
   uint32_t anchor;
   struct {
     int32_t top, right, bottom, left;
   } margin;
+  int32_t exclusive_zone;
+  uint32_t exclusive_edge;
 };
 
 struct hikari_layer_popup {

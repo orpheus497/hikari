@@ -420,51 +420,6 @@ layer_at(struct wl_list *layers,
   return false;
 }
 
-static bool
-topmost_of(struct wl_list *layers,
-    double ox,
-    double oy,
-    struct wlr_surface **surface,
-    double *sx,
-    double *sy,
-    struct hikari_node **node)
-{
-  double out_sx, out_sy;
-
-  struct hikari_layer *layer;
-  wl_list_for_each (layer, layers, layer_surfaces) {
-    struct hikari_node *out_node = (struct hikari_node *)layer;
-
-    struct wlr_layer_surface_v1_state *state = &layer->surface->current;
-
-    struct wlr_surface *out_surface =
-        hikari_node_surface_at(out_node, ox, oy, &out_sx, &out_sy);
-
-    if (state->keyboard_interactive) {
-      if (out_surface != NULL) {
-        *surface = out_surface;
-      } else {
-        *surface = layer->surface->surface;
-      }
-
-      *sx = out_sx;
-      *sy = out_sy;
-      *node = out_node;
-
-      return true;
-    } else if (out_surface != NULL) {
-      *surface = out_surface;
-
-      *sx = out_sx;
-      *sy = out_sy;
-      *node = out_node;
-
-      return true;
-    }
-  }
-
-  return false;
-}
 #endif
 
 static struct hikari_node *
@@ -500,7 +455,15 @@ node_at(double lx,
   struct hikari_node *node;
 
 #ifdef HAVE_LAYERSHELL
-  if (topmost_of(&output->layers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY],
+  /* Action purpose: Plain hit testing, on this layer as on every other. The
+  layer-shell protocol is explicit that layer surfaces "receive pointer, touch,
+  and tablet events normally", and that keyboard interactivity governs keyboard
+  focus alone -- a surface that wants no pointer input says so with an empty
+  input region, not with its keyboard interactivity. This call site used to run a
+  variant that handed every coordinate on the output to the first
+  keyboard-interactive surface it found, hit or miss, which made every window
+  underneath unclickable for as long as such a surface was mapped. */
+  if (layer_at(&output->layers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY],
           lx - output->geometry.x,
           ly - output->geometry.y,
           surface,
@@ -530,7 +493,7 @@ node_at(double lx,
 #endif
 
 #ifdef HAVE_LAYERSHELL
-  if (topmost_of(&output->layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP],
+  if (layer_at(&output->layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP],
           lx - output->geometry.x,
           ly - output->geometry.y,
           surface,
