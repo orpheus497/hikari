@@ -98,6 +98,7 @@ struct hikari_server {
     struct wlr_scene_tree *bottom;
     struct wlr_scene_tree *views;
     struct wlr_scene_tree *top;
+    struct wlr_scene_tree *fullscreen;
     struct wlr_scene_tree *overlay;
     struct wlr_scene_tree *lock;
   } layers;

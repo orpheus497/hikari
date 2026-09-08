@@ -653,6 +653,28 @@ commit_pending_operation(
   }
 }
 
+static void
+refresh_scene_layer(struct hikari_view *view)
+{
+  assert(view != NULL);
+
+  if (view->scene_node == NULL) {
+    return;
+  }
+
+  struct wlr_scene_tree *layer;
+
+  if (hikari_server_in_lock_mode() && hikari_view_is_public(view)) {
+    layer = hikari_server.layers.lock;
+  } else if (hikari_view_is_fullscreen(view)) {
+    layer = hikari_server.layers.fullscreen;
+  } else {
+    layer = hikari_server.layers.views;
+  }
+
+  wlr_scene_node_reparent(view->scene_node, layer);
+}
+
 /* [COMMENT] Function purpose: Drop the fullscreen shadow and give the view its
 border back. Idempotent, so every exit path can call it unconditionally.
 
@@ -689,6 +711,8 @@ unshadow_fullscreen(struct hikari_view *view)
 
     view->border.state = focused ? HIKARI_BORDER_ACTIVE : HIKARI_BORDER_INACTIVE;
   }
+
+  refresh_scene_layer(view);
 }
 
 // [COMMENT] Function purpose: Handle resetting view state operations.
@@ -1466,14 +1490,7 @@ hikari_view_map(struct hikari_view *view, struct wlr_surface *surface)
   Deriving the parent here on every map makes the layer a property of the
   view's current state rather than of whatever happened to be true when it was
   first constructed. */
-  if (view->scene_node != NULL) {
-    struct wlr_scene_tree *layer =
-        (hikari_server_in_lock_mode() && hikari_view_is_public(view))
-            ? hikari_server.layers.lock
-            : hikari_server.layers.views;
-
-    wlr_scene_node_reparent(view->scene_node, layer);
-  }
+  refresh_scene_layer(view);
 
   if (!hikari_server_in_lock_mode() || hikari_view_is_public(view)) {
     hikari_view_show(view);
@@ -2871,6 +2888,8 @@ hikari_view_commit_pending_operation(
 
   commit_operation(&view->pending_operation, view);
   hikari_view_unset_dirty(view);
+
+  refresh_scene_layer(view);
 
   /* [COMMENT] Action purpose: Maximization changes land here. hikari reaches
   HIKARI_MAXIMIZATION_FULLY_MAXIMIZED through several commit paths that all

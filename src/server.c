@@ -492,6 +492,29 @@ node_at(double lx,
   }
 #endif
 
+  struct hikari_view *fullscreen_view = NULL;
+  wl_list_for_each (
+      fullscreen_view, &output_workspace->views, workspace_views) {
+    if (!hikari_view_is_fullscreen(fullscreen_view)) {
+      continue;
+    }
+
+    node = (struct hikari_node *)fullscreen_view;
+
+    int fullscreen_dx;
+    int fullscreen_dy;
+    hikari_animation_offset(fullscreen_view, &fullscreen_dx, &fullscreen_dy);
+
+    if (surface_at(node,
+            lx - output->geometry.x - fullscreen_dx,
+            ly - output->geometry.y - fullscreen_dy,
+            surface,
+            sx,
+            sy)) {
+      return node;
+    }
+  }
+
 #ifdef HAVE_LAYERSHELL
   if (layer_at(&output->layers[ZWLR_LAYER_SHELL_V1_LAYER_TOP],
           lx - output->geometry.x,
@@ -506,6 +529,10 @@ node_at(double lx,
 
   struct hikari_view *view = NULL;
   wl_list_for_each (view, &output_workspace->views, workspace_views) {
+    if (hikari_view_is_fullscreen(view)) {
+      continue;
+    }
+
     node = (struct hikari_node *)view;
 
     /* [COMMENT] Action purpose: Hit-test against where the window is DRAWN, not
@@ -979,7 +1006,7 @@ setup_scene_graph(struct hikari_server *server)
     exit(EXIT_FAILURE);
   }
 
-  /* [COMMENT] Action purpose: Create the six stacking layers everything else
+  /* [COMMENT] Action purpose: Create the seven stacking layers everything else
   attaches to. Nothing may parent itself to server->scene->tree directly after
   this point -- that is what reintroduces the flat list these replace. */
   struct wlr_scene_tree **layers[] = {
@@ -987,6 +1014,7 @@ setup_scene_graph(struct hikari_server *server)
     &server->layers.bottom,
     &server->layers.views,
     &server->layers.top,
+    &server->layers.fullscreen,
     &server->layers.overlay,
     &server->layers.lock,
   };
