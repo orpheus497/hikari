@@ -1742,11 +1742,13 @@ over the layout on purpose.
 Re-tiling when the reserved space changes
 -----------------------------------------
 
-A panel starting, exiting, growing, hiding on autohide or moving to another
-output all change that output's usable area. The sheet displayed there is then
-laid out against a box that no longer exists, so the compositor requests a
-re-tile for it, in exactly the same way it does when an output is moved or
-changes mode.
+A panel that reserves space -- one with a nonzero exclusive zone -- changes that
+output's usable area when it starts, exits, grows, hides on autohide or moves to
+another output. The sheet displayed there is then laid out against a box that no
+longer exists, so the compositor requests a re-tile for it, in exactly the same
+way it does when an output is moved or changes mode. A surface that reserves
+nothing leaves the usable area alone and triggers none of this, whatever it
+does.
 
 The request goes through the ordinary reflow path described under **LAYOUT
 POLICY**, which means it is subject to the same rules: it happens only when
