@@ -204,6 +204,29 @@ CFLAGS += -DHAVE_VIRTUAL_INPUT=1
 CFLAGS += -Wall -I. -Iinclude -DHIKARI_ETC_PREFIX=${ETC_PREFIX} -DHIKARI_PREFIX=${PREFIX}
 CFLAGS += -DHIKARI_TOPBAR_PATH='"${PREFIX}/bin/hikari-topbar"'
 
+# [COMMENT] Action purpose: Emit a make-readable dependency list beside every
+# object file, so that editing a header rebuilds every object that includes it.
+# Without this the Makefile declares exactly one header dependency in total
+# (`main.o: version.h` below), which means a change to a struct in
+# include/hikari/ recompiles only the .c files that were themselves edited and
+# leaves every other object linked at the OLD field offsets. That is not a
+# stale-build annoyance -- it silently produces a binary in which two objects
+# disagree about where a struct member lives, and it cost a boot-failing
+# compositor once already (a pointer added to struct hikari_server moved
+# output_layout by eight bytes; output.o read the old offset and dereferenced
+# NULL at startup).
+#
+# -MMD writes <object>.d as a side effect of the compile itself, so it costs no
+# extra pass, and skips system headers -- those are the ones that do not change
+# between builds and would only bloat the file. -MP adds a phony target for
+# each header, which is what stops make from erroring out with "no rule to make
+# target" when a header is deleted or renamed rather than edited.
+#
+# Deliberately placed AFTER the TOPBAR_CFLAGS snapshot above: hikari-topbar is
+# compiled straight to an executable rather than to an object, so a dependency
+# file for it would describe a target that no rule ever consults.
+CFLAGS += -MMD -MP
+
 WLROOTS_CFLAGS != ${PKG_CONFIG} --cflags wlroots-0.20
 WLROOTS_LIBS != ${PKG_CONFIG} --libs wlroots-0.20
 
@@ -315,6 +338,8 @@ clean: clean-doc
 	@rm ${PROTOCOL_HEADERS} 2> /dev/null ||:
 	@echo "cleaning object files"
 	@rm ${OBJS} 2> /dev/null ||:
+	@echo "cleaning dependency files"
+	@rm ${OBJS:.o=.d} 2> /dev/null ||:
 	@echo "cleaning executables"
 	@rm hikari 2> /dev/null ||:
 	@rm hikari-unlocker 2> /dev/null ||:
@@ -377,6 +402,8 @@ hikari-${VERSION}.tar.gz: version.h doc
 		share/hikari_sakura_alpha.png \
 		share/backgrounds/hikari/hikari_wallpaper.png \
 		share/wayland-sessions/hikari.desktop \
+		share/wayland-sessions/hikari-sakura.desktop \
+		share/xdg-desktop-portal/sakura-portals.conf \
 		etc/hikari/hikari.conf \
 		etc/pam.d/hikari-unlocker.*
 
@@ -406,6 +433,7 @@ install: hikari hikari-unlocker hikari-topbar share/man/man1/hikari.1
 	mkdir -p ${DESTDIR}/${PREFIX}/share/man/man1
 	mkdir -p ${DESTDIR}/${PREFIX}/share/backgrounds/hikari
 	mkdir -p ${DESTDIR}/${PREFIX}/share/wayland-sessions
+	mkdir -p ${DESTDIR}/${PREFIX}/share/xdg-desktop-portal
 	mkdir -p ${DESTDIR}/${ETC_PREFIX}/etc/hikari
 	mkdir -p ${DESTDIR}/${ETC_PREFIX}/etc/pam.d
 	sed "s,PREFIX,${PREFIX}," etc/hikari/hikari.conf > ${DESTDIR}/${ETC_PREFIX}/etc/hikari/hikari.conf
@@ -425,9 +453,30 @@ install: hikari hikari-unlocker hikari-topbar share/man/man1/hikari.1
 	# [COMMENT] Action purpose: Rewrite the desktop entry Exec= value to use the
 	# absolute installed path so display managers resolve the wrapper correctly.
 	sed "s,Exec=start-hikari,Exec=${PREFIX}/bin/start-hikari," share/wayland-sessions/hikari.desktop > ${DESTDIR}/${PREFIX}/share/wayland-sessions/hikari.desktop
+	# [COMMENT] Action purpose: The second session entry, listed as "Hikari
+	# Sakura", which runs the compositor binary rather than the wrapper script.
+	# Only the binary is rewritten to an absolute path -- dbus-run-session is
+	# resolved from PATH, because it belongs to the dbus package and its prefix
+	# is not ours to assume.
+	#
+	# The dbus-run-session prefix is not optional and must not be trimmed to
+	# "just the binary": it is what creates the session message bus. Without one
+	# xdg-desktop-portal cannot be activated (no screen sharing or screenshots),
+	# no process can own org.kde.StatusNotifierWatcher (no system tray) and
+	# nothing can serve org.freedesktop.Notifications (no notifications). The
+	# wrapper script provides the same bus for the other entry.
+	sed "s,Exec=dbus-run-session hikari,Exec=dbus-run-session ${PREFIX}/bin/hikari," share/wayland-sessions/hikari-sakura.desktop > ${DESTDIR}/${PREFIX}/share/wayland-sessions/hikari-sakura.desktop
 	# [COMMENT] Action purpose: Set desktop entry file permissions to read-only
 	# (644) matching freedesktop.org wayland-sessions convention.
 	chmod 644 ${DESTDIR}/${PREFIX}/share/wayland-sessions/hikari.desktop
+	chmod 644 ${DESTDIR}/${PREFIX}/share/wayland-sessions/hikari-sakura.desktop
+	# [COMMENT] Action purpose: Install the portal backend map. This is what
+	# lets XDG_CURRENT_DESKTOP be the single name "Sakura": backend selection
+	# reads this file instead of matching that variable against the UseIn= list
+	# in xdg-desktop-portal-wlr's portal file, which contains no Sakura name.
+	# Omitting it while the identity stays "Sakura" costs screen sharing and
+	# screenshots, with nothing logged to say why -- the two changes are a pair.
+	install -m 644 share/xdg-desktop-portal/sakura-portals.conf ${DESTDIR}/${PREFIX}/share/xdg-desktop-portal/sakura-portals.conf
 	install -m 644 etc/pam.d/hikari-unlocker.${OS} ${DESTDIR}/${ETC_PREFIX}/etc/pam.d/hikari-unlocker
 
 uninstall:
@@ -438,10 +487,17 @@ uninstall:
 	-rm ${DESTDIR}/${PREFIX}/share/man/man1/hikari.1
 	-rm ${DESTDIR}/${PREFIX}/share/backgrounds/hikari/hikari_wallpaper.png
 	-rm ${DESTDIR}/${PREFIX}/share/wayland-sessions/hikari.desktop
+	-rm ${DESTDIR}/${PREFIX}/share/wayland-sessions/hikari-sakura.desktop
+	-rm ${DESTDIR}/${PREFIX}/share/xdg-desktop-portal/sakura-portals.conf
 	-rm ${DESTDIR}/${ETC_PREFIX}/etc/pam.d/hikari-unlocker
 	-rm ${DESTDIR}/${ETC_PREFIX}/etc/hikari/hikari.conf
 	-rmdir ${DESTDIR}/${ETC_PREFIX}/etc/hikari
 	-rmdir ${DESTDIR}/${PREFIX}/share/backgrounds/hikari
+	# [COMMENT] Action purpose: Only this desktop's own directory is removed,
+	# and only when empty. ${PREFIX}/share/xdg-desktop-portal is shared with the
+	# portal packages themselves, so rmdir failing here is the correct and
+	# expected outcome on any system that has them installed.
+	-rmdir ${DESTDIR}/${PREFIX}/share/xdg-desktop-portal
 
 # [COMMENT] Action purpose: Seed a working per-user config for the invoking
 # user (run as yourself, no sudo/DESTDIR -- this writes into $HOME). Copies
@@ -467,3 +523,20 @@ uninstall-user:
 	@test -n "${HOME}" || { echo "error: HOME is not set" >&2; exit 1; }
 	-rm "${HOME}/.config/hikari/hikari_wallpaper.png"
 	@echo "uninstall-user: ${HOME}/.config/hikari/hikari.conf left in place -- remove it manually if desired"
+
+# [COMMENT] Action purpose: Read back the dependency files -MMD wrote on the
+# previous build, which is what turns them into actual rules. Kept at the very
+# end of the file so that no dependency line can ever be read before `all`, and
+# therefore no generated file can accidentally become the default target.
+#
+# `.sinclude` rather than `.include` is the load-bearing choice: on a clean tree
+# none of these files exist yet, and `.include` would abort the build rather
+# than proceed to create them. A `.for` loop over the object list is used in
+# place of a wildcard because bmake does not glob include paths -- naming each
+# file explicitly is the portable form, and it also means a .d left behind by an
+# object that is no longer built is simply never read.
+DEPS = ${OBJS:.o=.d}
+
+.for _dep in ${DEPS}
+.sinclude "${_dep}"
+.endfor

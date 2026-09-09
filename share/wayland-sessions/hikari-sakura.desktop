@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Hikari Sakura
+Comment=FreeBSD focused comprehensive Wayland desktop environment
+Exec=dbus-run-session hikari
+Type=Application
+DesktopNames=Sakura

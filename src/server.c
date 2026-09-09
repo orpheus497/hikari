@@ -1544,6 +1544,41 @@ session_active_handler(struct wl_listener *listener, void *data)
   }
 }
 
+/* [COMMENT] Function purpose: Establish this desktop's identity in the
+environment, for the session entry that launches the compositor binary directly
+and therefore runs no wrapper script.
+
+Two session entries ship: hikari.desktop execs start-hikari.sh, which exports
+these itself, and hikari-sakura.desktop execs the binary under
+dbus-run-session, which exports nothing. Without this the second entry would
+report whatever the display manager happened to set, or nothing at all, and the
+same desktop would be named differently depending on which entry was picked at
+the login screen.
+
+Every variable is set with overwrite=0, which is the whole design of this
+function: a display manager that already set one did so from the DesktopNames
+of the entry the user actually selected, and that value is authoritative. This
+only fills in what nobody else provided. The wrapper, by contrast, sets its
+copies unconditionally -- it is establishing a known-good environment rather
+than completing someone else's.
+
+Runs before export_activation_environment(), so whatever is settled here is
+what gets published to the D-Bus activation environment.
+
+XDG_CURRENT_DESKTOP is a single name rather than a colon-separated list because
+it is read verbatim by tools that report the running desktop. It is safe to
+drop the ":wlroots" suffix it once carried ONLY because
+share/xdg-desktop-portal/sakura-portals.conf now names the portal backends for
+this desktop directly; that file and this value are a matched pair, and
+removing it silently costs screen sharing. */
+static void
+export_desktop_identity(void)
+{
+  setenv("XDG_CURRENT_DESKTOP", "Sakura", false);
+  setenv("XDG_SESSION_DESKTOP", "Sakura", false);
+  setenv("XDG_SESSION_TYPE", "wayland", false);
+}
+
 static void
 server_init(struct hikari_server *server, char *config_path)
 {
@@ -1607,6 +1642,12 @@ server_init(struct hikari_server *server, char *config_path)
   }
 
   setenv("WAYLAND_DISPLAY", server->socket, true);
+
+  // [COMMENT] Action purpose: Fill in the desktop identity here, beside the
+  // socket name, because this is the point at which the session's environment
+  // becomes real -- and because everything spawned from now on (autostart
+  // entries, the top bar helper, D-Bus activated services) inherits it.
+  export_desktop_identity();
 
   server->compositor =
       wlr_compositor_create(server->display, 5, server->renderer);

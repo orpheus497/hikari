@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=Hikari Sakura
-Comment=FreeBSD focused comprehensive Wayland desktop environment
+Name=Hikari
+Comment=Hikari Sakura via the start-hikari session wrapper
 Exec=start-hikari
 Type=Application
-DesktopNames=Hikari Sakura;wlroots
+DesktopNames=Sakura

@@ -77,14 +77,26 @@ They are, however, what the defaults assume:
   is not expressible in any standards-track Wayland protocol, so the compositor
   exposes it over a small Unix socket instead — see
   [The control socket](#the-control-socket).
+* **The shipped configuration binds three keys to `saber`** — `LS+d` (the
+  application grid), `LS+e` (the window spread) and `LS+p` (show/hide the panel
+  column), each driven through `saberctl`. They are the shifted counterparts of
+  the `sofi` keys above, so the two companions stay on one mental map:
+  unshifted summons a `sofi` surface, shifted drives the panel that is already
+  on screen. There is no binding to *start* `saber` — it is not summoned, it
+  runs for the whole session. Start it from [autostart](#autostart).
 * **`saber` is otherwise a plain Wayland client and patches nothing.** It lists
   and acts on windows through `wlr-foreign-toplevel-management` and places its
   surfaces with `wlr-layer-shell`, so it needs `WITH_LAYERSHELL` and
-  `WITH_FOREIGN_TOPLEVEL_MANAGEMENT` — both on by default. Start it from
-  [autostart](#autostart) if you want it.
-* **`sakura` launches the session through the installed `hikari.desktop`
-  entry**, the same as any other display manager that reads
-  `${PREFIX}/share/wayland-sessions`.
+  `WITH_FOREIGN_TOPLEVEL_MANAGEMENT` — both on by default.
+* **`saber` sits on two different layers, which decides what covers what.** Its
+  panel is a layer-shell `TOP` surface, so a fullscreen window covers it. Its
+  application grid and window spread are `OVERLAY` surfaces, which sit above
+  the fullscreen band and therefore draw over a fullscreen window. Both are
+  hidden by the lock screen — see Capabilities & Limitations under
+  [Configuration & Customization](#configuration--customization).
+* **`sakura` launches the session through whichever installed entry you pick**,
+  the same as any other display manager that reads
+  `${PREFIX}/share/wayland-sessions` — see [The two session entries](#the-two-session-entries).
 
 Each project is built and installed independently; none of them requires
 another at build time.
@@ -230,6 +242,17 @@ The configuration file allows you to define:
   of the compositor to apply.
 - Hikari Sakura provides its own built-in status bar, described below. External
   layer-shell components such as `waybar` work alongside it if you prefer them.
+- Layer-shell surfaces stack in seven bands. From back to front they are: the
+  wallpaper, `BOTTOM`, ordinary windows, `TOP`, fullscreen windows, `OVERLAY`,
+  and the lock screen. The consequence worth knowing is that **fullscreen sits
+  between `TOP` and `OVERLAY`**: a fullscreen window covers a panel on `TOP`
+  (which is where `saber`'s panel and most bars place themselves) but does not
+  cover an `OVERLAY` surface (where `saber`'s application grid and window
+  spread place themselves). A client chooses its own layer, so this is what
+  decides whether a given surface is covered.
+- The lock screen disables every one of those bands except the wallpaper, and
+  disabling a band disables everything inside it. No client can put a surface
+  back on screen while locked, including one mapped after the lock began.
 - Focus follows the mouse, but a layer-shell surface that asks for no keyboard
   (`keyboard_interactivity none` — the setting a panel or dock normally uses)
   does not change which output is active when you hover it. Moving onto a
@@ -474,7 +497,10 @@ to the project being in its `first` stages; it is currently considered
 
 ### Dependencies
 
+**Build dependencies**
+
 * wlroots (0.20)
+* wayland (the `wayland-server` library and `wayland-scanner`)
 * wayland-protocols
 * pango
 * cairo
@@ -484,8 +510,22 @@ to the project being in its `first` stages; it is currently considered
 * libucl
 * evdev-proto
 * epoll-shim (FreeBSD)
-* XWayland (optional, runtime dependency)
+* pkgconf — every dependency above is located with `pkg-config`
 * pandoc (needed by `make install` from a git checkout — see [Building the manpage](#building-the-manpage))
+
+**Runtime dependencies**
+
+* seatd — how `hikari` acquires the input and DRM privileges it needs, unless
+  it is installed setuid root instead
+* dbus — `start-hikari` calls `dbus-run-session`, and the `Hikari Sakura`
+  session entry calls it directly. Without a session bus there are no portals
+  (so no screen sharing), no system tray and no notifications
+* XWayland (optional) — only for X11 clients
+* xdg-desktop-portal and xdg-desktop-portal-wlr (optional) — screen sharing and
+  screenshots for applications that request them through the portal
+* grim and slurp (optional) — used by the default `screenshot` and `screenclip`
+  actions bound to `Print` and `Shift+Print`. Rebind or remove those two
+  `actions` entries if you do not want them
 
 ### Compiling and Installing
 
@@ -656,14 +696,37 @@ make DEBUG=YES ASAN=YES
 
 ## Launching
 
-Use `start-hikari` to launch the compositor. It sets up the required Wayland
-session environment before executing the `hikari` binary:
+### The two session entries
+
+`make install` writes two entries into `${PREFIX}/share/wayland-sessions`, so a
+display manager — [`sakura`](https://github.com/orpheus497/sakura), GDM, SDDM or
+greetd — offers both at the login screen:
+
+| Shown as | File | Runs |
+| --- | --- | --- |
+| **Hikari** | `hikari.desktop` | `start-hikari`, the session wrapper script |
+| **Hikari Sakura** | `hikari-sakura.desktop` | `dbus-run-session hikari`, the compositor binary |
+
+Both declare `DesktopNames=Sakura`, so the desktop is reported under the same
+name whichever is chosen.
+
+**`Hikari Sakura` is the one to pick unless you need otherwise.** It starts the
+compositor binary directly, with `dbus-run-session` in front of it purely to
+provide the session message bus that portals, the system tray and notifications
+all need. Everything else the wrapper does is either already supplied by your
+login manager or is a fallback for systems that do not supply it.
+
+**`Hikari` runs the wrapper**, which is worth having when the environment needs
+setting up rather than merely inheriting — most notably on machines where the
+display has to be assigned deliberately.
+
+Neither entry is required in order to start the compositor by hand from a TTY.
+
+### What `start-hikari` does
 
 * Clears leaked `WAYLAND_DISPLAY` / `DISPLAY` variables
-* Sets `XDG_SESSION_TYPE`, `XDG_SESSION_CLASS` and
-  `XDG_CURRENT_DESKTOP="Hikari Sakura:wlroots"` — both entries of that list
-  matter, the first as this desktop's own identity and the second because it is
-  what `xdg-desktop-portal-wlr` lists in its `UseIn=` field
+* Sets `XDG_SESSION_TYPE`, `XDG_SESSION_CLASS`, and `XDG_CURRENT_DESKTOP` /
+  `XDG_SESSION_DESKTOP` to `Sakura`
 * Creates `XDG_RUNTIME_DIR` if the system did not provide one
 * Validates `XDG_RUNTIME_DIR` ownership (current user) and permissions (`0700`)
 * Warns if `XDG_RUNTIME_DIR` resides on ZFS (incompatible with `posix_fallocate`)
@@ -675,9 +738,30 @@ session environment before executing the `hikari` binary:
 start-hikari
 ```
 
-If you are using a display manager — [`sakura`](https://github.com/orpheus497/sakura),
-GDM, SDDM or greetd — the installed `hikari.desktop` session file calls
-`start-hikari` automatically.
+### The desktop name, and why screen sharing depends on it
+
+The compositor identifies this desktop as `Sakura` — a single name, set by
+`start-hikari` for one entry and by the compositor itself for the other, so both
+paths agree. It is a single name deliberately: everything that reports the
+running desktop reads `XDG_CURRENT_DESKTOP` verbatim, and a colon-separated list
+is displayed as one.
+
+That name used to carry a `:wlroots` suffix, for one reason: the portal backend
+was chosen by matching this variable against the `UseIn=` field of
+`xdg-desktop-portal-wlr`'s portal file, which lists `wlroots`, `sway`, `Wayfire`,
+`river`, `phosh` and `Hyprland` — and no Sakura name. Without a match, screen
+sharing silently found no provider.
+
+`make install` now writes
+`${PREFIX}/share/xdg-desktop-portal/sakura-portals.conf`, which names the
+backends for this desktop directly and removes that coupling entirely.
+
+**If you install the session entries without that file — or change the desktop
+name without renaming it to match — screen sharing and screenshots stop working
+and nothing is logged to say why.** The filename is derived from the desktop
+name (`$XDG_CURRENT_DESKTOP-portals.conf`, lower-cased), so it is tied to
+`DesktopNames` in both session entries and to the default the compositor sets.
+Change one and all four change together.
 
 The default configuration expects your default terminal emulator to be specified
 in the `$TERMINAL` environment variable.
@@ -707,7 +791,9 @@ logging.
 | `${ETC_PREFIX}/etc/hikari/hikari.conf` | System-wide default configuration, used when no user configuration is readable. |
 | `~/.config/hikari/autostart` | Executed at startup if readable and executable. |
 | `${ETC_PREFIX}/etc/pam.d/hikari-unlocker` | PAM policy used by `hikari-unlocker`. |
-| `${PREFIX}/share/wayland-sessions/hikari.desktop` | Session entry read by display managers. |
+| `${PREFIX}/share/wayland-sessions/hikari.desktop` | Session entry shown as **Hikari**; runs `start-hikari`. |
+| `${PREFIX}/share/wayland-sessions/hikari-sakura.desktop` | Session entry shown as **Hikari Sakura**; runs `dbus-run-session hikari`. |
+| `${PREFIX}/share/xdg-desktop-portal/sakura-portals.conf` | Portal backend map. Required for screen sharing — see [Launching](#the-desktop-name-and-why-screen-sharing-depends-on-it). |
 | `${PREFIX}/share/backgrounds/hikari/hikari_wallpaper.png` | Default wallpaper. |
 | `$XDG_RUNTIME_DIR/hikari.sock` | Control socket, mode `0600`. Removed on exit. |
 
@@ -720,7 +806,8 @@ logging.
 | `TERMINAL` | Terminal emulator used by the default configuration. |
 | `HIKARI_LOG` | File path for `start-hikari` to capture compositor output to. |
 | `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_MODEL`, `XKB_DEFAULT_OPTIONS`, `XKB_DEFAULT_RULES` | Fallback keyboard configuration for keyboards not configured in `hikari.conf`. Read once at startup. |
-| `XDG_CURRENT_DESKTOP` | Set by `start-hikari` to `Hikari Sakura:wlroots` for portal backend selection. |
+| `XDG_CURRENT_DESKTOP` | This desktop's name, `Sakura`. Exported by `start-hikari`; also set by the compositor itself (without overwriting an existing value) so the binary session entry reports the same name. |
+| `XDG_SESSION_DESKTOP` | Same value, for the tools that read this one instead. |
 | `DBUS_SESSION_BUS_ADDRESS` | If unset, `start-hikari` wraps the compositor in `dbus-run-session`. |
 
 Any environment variable can also be referenced from string values in

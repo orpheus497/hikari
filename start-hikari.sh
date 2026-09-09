@@ -18,19 +18,34 @@ unset DISPLAY
 export XDG_SESSION_TYPE=wayland
 export XDG_SESSION_CLASS=user
 
-# [COMMENT] Action purpose: Export XDG_CURRENT_DESKTOP so xdg-desktop-portal can
-# select a backend. The value is a COLON-SEPARATED list, and both entries matter:
+# [COMMENT] Action purpose: Export the desktop identity. This is a single name,
+# not a colon-separated list, because it is read verbatim by everything that
+# reports which desktop is running -- a list shows up as "Sakura:wlroots" in
+# every system-info tool.
 #
-#   Hikari Sakura  keeps this desktop's own identity, for anything that matches
-#                  on it and for consistency with hikari.desktop's DesktopNames.
-#   wlroots        is what xdg-desktop-portal-wlr lists in its portal file's
-#                  UseIn= field.
+# It carried a ":wlroots" suffix previously for one reason only: the portal
+# backend was selected by matching this variable against the UseIn= field of
+# xdg-desktop-portal-wlr's portal file, which lists wlroots, sway, Wayfire,
+# river, phosh and Hyprland but no Sakura name. Dropping the suffix therefore
+# used to mean no backend matched and screen sharing silently found no
+# provider.
 #
-# With the identity alone, NO portal backend matched at all -- so screen sharing
-# and screencast silently found no provider even though the compositor
-# advertises the capture protocols they rely on. Appending the generic name is
-# what makes the wlroots backend eligible without giving up the specific one.
-export XDG_CURRENT_DESKTOP="Hikari Sakura:wlroots"
+# That coupling is now gone: share/xdg-desktop-portal/sakura-portals.conf names
+# the backends for this desktop directly, so selection no longer depends on
+# this value at all. The two are a matched pair -- if that file is not
+# installed, this name must regain its ":wlroots" suffix or capture breaks with
+# no diagnostic.
+#
+# Set unconditionally rather than with a default, because this script's whole
+# purpose is to establish a known-good session environment; a display manager
+# that set something else did so for a session entry that named this desktop.
+export XDG_CURRENT_DESKTOP="Sakura"
+
+# [COMMENT] Action purpose: Name the session for the two consumers that read
+# XDG_SESSION_DESKTOP rather than XDG_CURRENT_DESKTOP. Kept identical to the
+# value above so the desktop cannot be reported under two different names
+# depending on which variable a tool happens to read.
+export XDG_SESSION_DESKTOP="Sakura"
 
 # [COMMENT] Action purpose: Bootstrap XDG_RUNTIME_DIR if the system (pam_xdg,
 # systemd, or elogind) did not provide one. FreeBSD with seatd typically
