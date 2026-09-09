@@ -3,6 +3,8 @@
 #include <hikari/animation.h>
 #include <hikari/output.h>
 
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 
 #include <wayland-server-core.h>
@@ -30,7 +32,10 @@ the half-drawn surface. */
 static inline bool
 render_image_to_surface(cairo_surface_t *output,
     cairo_surface_t *image,
-    enum hikari_background_fit fit)
+    enum hikari_background_fit fit,
+    double output_width,
+    double output_height,
+    double scale)
 {
   cairo_t *cairo = cairo_create(output);
   if (cairo_surface_status(image) != CAIRO_STATUS_SUCCESS) {
@@ -38,8 +43,11 @@ render_image_to_surface(cairo_surface_t *output,
     return false;
   }
 
-  double output_width = cairo_image_surface_get_width(output);
-  double output_height = cairo_image_surface_get_height(output);
+  /* Action purpose: The surface is allocated in physical pixels so a scaled
+  output gets a sharp wallpaper, but every fit below is expressed in logical
+  ones -- centring and tiling would otherwise shrink with the scale factor. */
+  cairo_scale(cairo, scale, scale);
+
   double width = cairo_image_surface_get_width(image);
   double height = cairo_image_surface_get_height(image);
 
@@ -56,14 +64,30 @@ render_image_to_surface(cairo_surface_t *output,
     }
     cairo_scale(cairo, output_width / width, output_height / height);
     cairo_set_source_surface(cairo, image, 0, 0);
-  } else if (fit == HIKARI_BACKGROUND_CENTER) {
-    cairo_set_source_surface(cairo,
-        image,
-        output_width / 2 - width / 2,
-        output_height / 2 - height / 2);
-  } else if (fit == HIKARI_BACKGROUND_TILE) {
+  } else if (fit == HIKARI_BACKGROUND_CENTER || fit == HIKARI_BACKGROUND_TILE) {
+    /* Action purpose: Neither of these resamples the image -- centring places
+    it at its own size and tiling repeats it at its own period -- so both want
+    one image pixel to land on one PHYSICAL pixel. The context is in logical
+    units, so the pattern matrix undoes that: it maps a logical unit to `scale`
+    image pixels, leaving the image sharp and its tile period equal to its pixel
+    size rather than growing with the display's scale factor. */
     cairo_pattern_t *pattern = cairo_pattern_create_for_surface(image);
-    cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
+
+    double logical_width = width / scale;
+    double logical_height = height / scale;
+
+    cairo_matrix_t matrix;
+    cairo_matrix_init_scale(&matrix, scale, scale);
+
+    if (fit == HIKARI_BACKGROUND_CENTER) {
+      cairo_matrix_translate(&matrix,
+          -(output_width / 2 - logical_width / 2),
+          -(output_height / 2 - logical_height / 2));
+    } else {
+      cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
+    }
+
+    cairo_pattern_set_matrix(pattern, &matrix);
     cairo_set_source(cairo, pattern);
     cairo_pattern_destroy(pattern);
   }
@@ -112,8 +136,35 @@ hikari_output_load_background(struct hikari_output *output,
   int output_width = output->geometry.width;
   int output_height = output->geometry.height;
 
+  float scale = output->wlr_output->scale;
+  if (scale <= 0.0f) {
+    scale = 1.0f;
+  }
+
+  /* Action purpose: The scale is client-controlled through output management,
+  and wlroots only rejects a non-positive one -- there is no upper bound, so the
+  product can exceed what an int can hold and converting it would be undefined.
+  Check the doubles before the conversion, not after. */
+  double scaled_width = (double)output_width * scale;
+  double scaled_height = (double)output_height * scale;
+
+  if (!isfinite(scaled_width) || !isfinite(scaled_height) ||
+      scaled_width > (double)INT_MAX - 1.0 ||
+      scaled_height > (double)INT_MAX - 1.0) {
+    cairo_surface_destroy(image);
+    goto done;
+  }
+
+  int pixel_width = (int)(scaled_width + 0.5);
+  int pixel_height = (int)(scaled_height + 0.5);
+
+  if (pixel_width <= 0 || pixel_height <= 0) {
+    cairo_surface_destroy(image);
+    goto done;
+  }
+
   cairo_surface_t *output_surface = cairo_image_surface_create(
-      CAIRO_FORMAT_ARGB32, output_width, output_height);
+      CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
   if (cairo_surface_status(output_surface) != CAIRO_STATUS_SUCCESS) {
     fprintf(stderr,
         "error: could not allocate background surface for output \"%s\": %s\n",
@@ -124,7 +175,8 @@ hikari_output_load_background(struct hikari_output *output,
     goto done;
   }
 
-  bool rendered = render_image_to_surface(output_surface, image, background_fit);
+  bool rendered = render_image_to_surface(
+      output_surface, image, background_fit, output_width, output_height, scale);
   if (!rendered || cairo_surface_status(output_surface) != CAIRO_STATUS_SUCCESS) {
     fprintf(stderr,
         "error: could not render background \"%s\" for output \"%s\"\n",
@@ -136,10 +188,10 @@ hikari_output_load_background(struct hikari_output *output,
   }
 
   unsigned char *data = cairo_image_surface_get_data(output_surface);
-  int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, output_width);
+  int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, pixel_width);
 
-  size_t byte_count = (size_t)stride * (size_t)output_height;
-  if (byte_count == 0 || byte_count / (size_t)stride != (size_t)output_height) {
+  size_t byte_count = (size_t)stride * (size_t)pixel_height;
+  if (byte_count == 0 || byte_count / (size_t)stride != (size_t)pixel_height) {
     fprintf(stderr, "error: output background buffer size overflow\n");
     cairo_surface_destroy(image);
     cairo_surface_destroy(output_surface);
@@ -153,7 +205,7 @@ hikari_output_load_background(struct hikari_output *output,
   // instead of aborting the compositor to display a wallpaper. See
   // DECISIONS_LOG Finding 4.
   struct wlr_buffer *bg_buffer =
-      hikari_buffer_create_argb8888(output_width, output_height, data, stride);
+      hikari_buffer_create_argb8888(pixel_width, pixel_height, data, stride);
 
   struct wlr_scene_buffer *scene_buffer = NULL;
 
@@ -164,6 +216,11 @@ hikari_output_load_background(struct hikari_output *output,
 
   if (scene_buffer != NULL) {
     output->background = &scene_buffer->node;
+
+    /* Action purpose: The buffer is in physical pixels; the scene works in
+    logical ones, so without this the wallpaper would overhang the screen by
+    the scale factor. */
+    wlr_scene_buffer_set_dest_size(scene_buffer, output_width, output_height);
     wlr_scene_node_set_position(
         output->background, output->geometry.x, output->geometry.y);
     wlr_scene_node_lower_to_bottom(output->background);
@@ -719,6 +776,16 @@ hikari_output_set_wants_enabled(
     }
 
     wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+
+    /* Action purpose: The bar node is not owned by the output's scene output,
+    so it survives at the coordinates the output has just vacated -- visible
+    again the moment another output is positioned over that region. Only the
+    node is switched off: bar->enabled still governs the usable-area
+    reservation, and hikari_bar_refresh() re-asserts the node on the way back
+    in. */
+    if (output->bar.scene_buffer != NULL) {
+      wlr_scene_node_set_enabled(&output->bar.scene_buffer->node, false);
+    }
     return;
   }
 
@@ -753,7 +820,16 @@ hikari_output_set_wants_enabled(
       hikari_server.scene_layout, l_output, scene_output);
 
   output->wants_enabled = true;
-  hikari_output_enable(output);
+
+  /* Action purpose: Lighting it now would break a blanked lock screen. The flag
+  above is what matters -- enable_outputs() brings it up with the rest on the
+  next keystroke. Same rule hikari_output_init() applies to a monitor connected
+  while locked. */
+  if (!hikari_server_in_lock_mode() ||
+      !hikari_lock_mode_are_outputs_disabled(&hikari_server.lock_mode)) {
+    hikari_output_enable(output);
+  }
+
   hikari_output_update_geometry(output);
 
   struct hikari_output_config *output_config =
