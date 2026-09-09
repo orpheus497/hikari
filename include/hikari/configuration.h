@@ -104,6 +104,27 @@ struct hikari_configuration {
   the last few pixels of the window's own screen. */
   enum hikari_spill spill;
 
+  /* [COMMENT] Class purpose: Who leads display configuration -- the top-level
+  `output_management_overrides_config` key.
+
+  true (the default) hands the lead to wlr-randr, kanshi and wdisplays: their
+  requests are applied, and a configuration reload no longer moves an output
+  back to the position written in `outputs { }`. That block still SEEDS an
+  output when it first appears, so a configured position is applied on plug-in
+  either way -- what changes is whether the file goes on asserting it.
+
+  false gives the lead back to this file. Clients may still read the
+  configuration, which is what keeps `wlr-randr` useful for finding out what
+  modes a monitor has, but every apply and test is refused and a reload
+  re-applies the configured position.
+
+  One global boolean rather than a per-output setting, because the protocol
+  replies succeeded or failed once for a whole configuration with no way to
+  refuse a single head, and wlr-randr submits every head on every invocation --
+  so pinning one output individually would fail commands that never touched it.
+  The cost is that outputs cannot be pinned individually. */
+  bool output_management_overrides_config;
+
   int border;
   int gap;
   int step;

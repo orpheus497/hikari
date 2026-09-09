@@ -34,6 +34,11 @@ struct hikari_output {
 
   bool enabled;
 
+  /* Class purpose: Part of the desktop, as opposed to `enabled` above, which is
+  only whether the CRTC is lit. The lock blank clears `enabled` and restores it;
+  this stays false until a client asks the output back. */
+  bool wants_enabled;
+
   struct wl_listener frame;
   struct wl_listener request_state;
   struct wl_listener destroy;
@@ -72,6 +77,21 @@ hikari_output_disable(struct hikari_output *output);
 
 void
 hikari_output_enable(struct hikari_output *output);
+
+/* Function purpose: Add an output to the desktop or take it out of it, which is
+more than lighting the CRTC: taking one out moves its views elsewhere, drops its
+scene output and removes its box from the output layout. */
+void
+hikari_output_set_wants_enabled(
+    struct hikari_output *output, bool wants_enabled);
+
+/* Function purpose: The layout and scene half of the above, on its own, for the
+one caller that has to render a frame between the two halves. */
+bool
+hikari_output_attach(struct hikari_output *output);
+
+void
+hikari_output_detach(struct hikari_output *output);
 
 /* Function purpose: Re-derive an output's geometry, usable area, bar
 reservation and background placement from the output layout. The single entry

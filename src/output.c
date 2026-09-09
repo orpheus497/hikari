@@ -3,6 +3,8 @@
 #include <hikari/animation.h>
 #include <hikari/output.h>
 
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 
 #include <wayland-server-core.h>
@@ -16,6 +18,7 @@
 #include <hikari/color.h>
 #include <hikari/memory.h>
 
+#include <hikari/output_management.h>
 #include <hikari/server.h>
 #ifdef HAVE_XWAYLAND
 #include <hikari/view.h>
@@ -29,7 +32,10 @@ the half-drawn surface. */
 static inline bool
 render_image_to_surface(cairo_surface_t *output,
     cairo_surface_t *image,
-    enum hikari_background_fit fit)
+    enum hikari_background_fit fit,
+    double output_width,
+    double output_height,
+    double scale)
 {
   cairo_t *cairo = cairo_create(output);
   if (cairo_surface_status(image) != CAIRO_STATUS_SUCCESS) {
@@ -37,8 +43,11 @@ render_image_to_surface(cairo_surface_t *output,
     return false;
   }
 
-  double output_width = cairo_image_surface_get_width(output);
-  double output_height = cairo_image_surface_get_height(output);
+  /* Action purpose: The surface is allocated in physical pixels so a scaled
+  output gets a sharp wallpaper, but every fit below is expressed in logical
+  ones -- centring and tiling would otherwise shrink with the scale factor. */
+  cairo_scale(cairo, scale, scale);
+
   double width = cairo_image_surface_get_width(image);
   double height = cairo_image_surface_get_height(image);
 
@@ -55,14 +64,30 @@ render_image_to_surface(cairo_surface_t *output,
     }
     cairo_scale(cairo, output_width / width, output_height / height);
     cairo_set_source_surface(cairo, image, 0, 0);
-  } else if (fit == HIKARI_BACKGROUND_CENTER) {
-    cairo_set_source_surface(cairo,
-        image,
-        output_width / 2 - width / 2,
-        output_height / 2 - height / 2);
-  } else if (fit == HIKARI_BACKGROUND_TILE) {
+  } else if (fit == HIKARI_BACKGROUND_CENTER || fit == HIKARI_BACKGROUND_TILE) {
+    /* Action purpose: Neither of these resamples the image -- centring places
+    it at its own size and tiling repeats it at its own period -- so both want
+    one image pixel to land on one PHYSICAL pixel. The context is in logical
+    units, so the pattern matrix undoes that: it maps a logical unit to `scale`
+    image pixels, leaving the image sharp and its tile period equal to its pixel
+    size rather than growing with the display's scale factor. */
     cairo_pattern_t *pattern = cairo_pattern_create_for_surface(image);
-    cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
+
+    double logical_width = width / scale;
+    double logical_height = height / scale;
+
+    cairo_matrix_t matrix;
+    cairo_matrix_init_scale(&matrix, scale, scale);
+
+    if (fit == HIKARI_BACKGROUND_CENTER) {
+      cairo_matrix_translate(&matrix,
+          -(output_width / 2 - logical_width / 2),
+          -(output_height / 2 - logical_height / 2));
+    } else {
+      cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
+    }
+
+    cairo_pattern_set_matrix(pattern, &matrix);
     cairo_set_source(cairo, pattern);
     cairo_pattern_destroy(pattern);
   }
@@ -111,8 +136,35 @@ hikari_output_load_background(struct hikari_output *output,
   int output_width = output->geometry.width;
   int output_height = output->geometry.height;
 
+  float scale = output->wlr_output->scale;
+  if (scale <= 0.0f) {
+    scale = 1.0f;
+  }
+
+  /* Action purpose: The scale is client-controlled through output management,
+  and wlroots only rejects a non-positive one -- there is no upper bound, so the
+  product can exceed what an int can hold and converting it would be undefined.
+  Check the doubles before the conversion, not after. */
+  double scaled_width = (double)output_width * scale;
+  double scaled_height = (double)output_height * scale;
+
+  if (!isfinite(scaled_width) || !isfinite(scaled_height) ||
+      scaled_width > (double)INT_MAX - 1.0 ||
+      scaled_height > (double)INT_MAX - 1.0) {
+    cairo_surface_destroy(image);
+    goto done;
+  }
+
+  int pixel_width = (int)(scaled_width + 0.5);
+  int pixel_height = (int)(scaled_height + 0.5);
+
+  if (pixel_width <= 0 || pixel_height <= 0) {
+    cairo_surface_destroy(image);
+    goto done;
+  }
+
   cairo_surface_t *output_surface = cairo_image_surface_create(
-      CAIRO_FORMAT_ARGB32, output_width, output_height);
+      CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
   if (cairo_surface_status(output_surface) != CAIRO_STATUS_SUCCESS) {
     fprintf(stderr,
         "error: could not allocate background surface for output \"%s\": %s\n",
@@ -123,7 +175,8 @@ hikari_output_load_background(struct hikari_output *output,
     goto done;
   }
 
-  bool rendered = render_image_to_surface(output_surface, image, background_fit);
+  bool rendered = render_image_to_surface(
+      output_surface, image, background_fit, output_width, output_height, scale);
   if (!rendered || cairo_surface_status(output_surface) != CAIRO_STATUS_SUCCESS) {
     fprintf(stderr,
         "error: could not render background \"%s\" for output \"%s\"\n",
@@ -135,10 +188,10 @@ hikari_output_load_background(struct hikari_output *output,
   }
 
   unsigned char *data = cairo_image_surface_get_data(output_surface);
-  int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, output_width);
+  int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, pixel_width);
 
-  size_t byte_count = (size_t)stride * (size_t)output_height;
-  if (byte_count == 0 || byte_count / (size_t)stride != (size_t)output_height) {
+  size_t byte_count = (size_t)stride * (size_t)pixel_height;
+  if (byte_count == 0 || byte_count / (size_t)stride != (size_t)pixel_height) {
     fprintf(stderr, "error: output background buffer size overflow\n");
     cairo_surface_destroy(image);
     cairo_surface_destroy(output_surface);
@@ -152,7 +205,7 @@ hikari_output_load_background(struct hikari_output *output,
   // instead of aborting the compositor to display a wallpaper. See
   // DECISIONS_LOG Finding 4.
   struct wlr_buffer *bg_buffer =
-      hikari_buffer_create_argb8888(output_width, output_height, data, stride);
+      hikari_buffer_create_argb8888(pixel_width, pixel_height, data, stride);
 
   struct wlr_scene_buffer *scene_buffer = NULL;
 
@@ -163,6 +216,11 @@ hikari_output_load_background(struct hikari_output *output,
 
   if (scene_buffer != NULL) {
     output->background = &scene_buffer->node;
+
+    /* Action purpose: The buffer is in physical pixels; the scene works in
+    logical ones, so without this the wallpaper would overhang the screen by
+    the scale factor. */
+    wlr_scene_buffer_set_dest_size(scene_buffer, output_width, output_height);
     wlr_scene_node_set_position(
         output->background, output->geometry.x, output->geometry.y);
     wlr_scene_node_lower_to_bottom(output->background);
@@ -274,6 +332,23 @@ hikari_output_enable(struct hikari_output *output)
   struct wlr_output_state state;
   wlr_output_state_init(&state);
   wlr_output_state_set_enabled(&state, true);
+
+  /* Action purpose: An atomic modeset scans out of the primary plane, and
+  wlroots only borrows the plane's existing framebuffer when the state carries
+  none. An output that was fully torn down -- or that never came up -- has no
+  such framebuffer, and the commit is then refused however valid the mode is.
+  Setting a mode and rendering one frame from the scene supplies both. */
+  if (wlr_output->current_mode == NULL) {
+    struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
+    if (mode != NULL) {
+      wlr_output_state_set_mode(&state, mode);
+    }
+  }
+
+  if (output->scene_output != NULL) {
+    wlr_scene_output_build_state(output->scene_output, &state, NULL);
+  }
+
   if (!wlr_output_commit_state(wlr_output, &state)) {
     wlr_output_state_finish(&state);
     return;
@@ -392,6 +467,18 @@ frame_handler(struct wl_listener *listener, void *data)
     wlr_log(WLR_ERROR,
         "frame_handler: wlr_scene_output_commit failed for output %s",
         output->wlr_output->name);
+
+    /* Action purpose: Ask for another frame, or this output never gets one
+    again. No frame-done goes out when the commit fails, so a client throttled
+    on frame callbacks stops committing; with a fullscreen window that client is
+    the only thing damaging the output, so nothing reschedules and the picture
+    is frozen until an unrelated damage source -- in practice moving the pointer
+    across that screen -- happens to wake it.
+
+    The damage survives: wlr_scene clears it from a commit listener, which a
+    failed commit never reaches, so the retry redraws the same region rather
+    than a stale one. */
+    wlr_output_schedule_frame(output->wlr_output);
     return;
   }
 
@@ -441,6 +528,13 @@ destroy_handler(struct wl_listener *listener, void *data)
 
   hikari_output_fini(output);
   hikari_free(output);
+
+  /* Action purpose: wlroots tears the client-facing head down by itself when
+  the output goes away, but it only marks the manager dirty -- the `done` that
+  tells clients the enumeration has settled is sent on the next publish. Without
+  this an unplugged monitor leaves every output-management client waiting. Runs
+  after the free, so the output is already out of hikari_server.outputs. */
+  hikari_output_management_broadcast();
 }
 
 // [COMMENT] Function purpose: Initialize a new compositor output, allocating workspace and configuring state.
@@ -475,6 +569,7 @@ hikari_output_init(struct hikari_output *output, struct wlr_output *wlr_output)
   // read an indeterminate value and could abort on a perfectly valid output in
   // debug builds.
   output->enabled = false;
+  output->wants_enabled = false;
   output->workspace = hikari_malloc(sizeof(struct hikari_workspace));
   assert(output->workspace != NULL);
 
@@ -537,6 +632,7 @@ hikari_output_init(struct hikari_output *output, struct wlr_output *wlr_output)
     wlr_output_state_finish(&state);
 
     output->enabled = true;
+    output->wants_enabled = true;
     wl_signal_add(&wlr_output->events.frame, &output->frame);
     wl_signal_add(&wlr_output->events.request_state, &output->request_state);
 
@@ -632,6 +728,183 @@ hikari_output_init(struct hikari_output *output, struct wlr_output *wlr_output)
   }
 }
 
+static void
+destroy_output_nodes(struct hikari_output *output)
+{
+  if (output->background != NULL) {
+    wlr_scene_node_destroy(output->background);
+    output->background = NULL;
+  }
+
+  if (output->lock_indicator_node != NULL) {
+    wlr_scene_node_destroy(&output->lock_indicator_node->node);
+    output->lock_indicator_node = NULL;
+  }
+
+  if (output->lock_backdrop_node != NULL) {
+    wlr_scene_node_destroy(&output->lock_backdrop_node->node);
+    output->lock_backdrop_node = NULL;
+  }
+
+  if (output->lock_clock_node != NULL) {
+    wlr_scene_node_destroy(&output->lock_clock_node->node);
+    output->lock_clock_node = NULL;
+  }
+}
+
+// Function purpose: Hand an output's views and focus to another output.
+static void
+evacuate_output(struct hikari_output *output)
+{
+  struct hikari_workspace *workspace = output->workspace;
+  struct hikari_workspace *next_workspace = hikari_workspace_next(workspace);
+  struct hikari_workspace *merge_workspace;
+
+  if (workspace != next_workspace) {
+    merge_workspace = next_workspace;
+  } else {
+    merge_workspace = hikari_server.noop_output->workspace;
+  }
+
+  hikari_workspace_merge(workspace, merge_workspace);
+
+  if (!hikari_server_in_lock_mode()) {
+    if (!hikari_server_in_normal_mode()) {
+      hikari_server_enter_normal_mode(NULL);
+    }
+
+    hikari_workspace_focus_view(merge_workspace, NULL);
+  } else {
+    merge_workspace->focus_view = NULL;
+    hikari_server.workspace = merge_workspace;
+  }
+}
+
+/* Function purpose: Give an output its place in the layout and a scene output,
+without touching the CRTC.
+
+Separate from enabling it because the order is forced: a mode-setting commit
+needs a framebuffer, the only way to produce one is to render a frame, and
+rendering a frame needs the scene output to exist first. */
+bool
+hikari_output_attach(struct hikari_output *output)
+{
+  assert(output != NULL);
+
+  if (output->scene_output != NULL) {
+    return true;
+  }
+
+  /* Action purpose: geometry still holds the box this output had when it was
+  last part of the layout, so it comes back where it left. */
+  struct wlr_output_layout_output *l_output =
+      wlr_output_layout_add(hikari_server.output_layout,
+          output->wlr_output,
+          output->geometry.x,
+          output->geometry.y);
+
+  if (l_output == NULL) {
+    fprintf(stderr,
+        "error: failed to add output \"%s\" back to the output layout\n",
+        output->wlr_output->name);
+    return false;
+  }
+
+  struct wlr_scene_output *scene_output =
+      wlr_scene_output_create(hikari_server.scene, output->wlr_output);
+
+  if (scene_output == NULL) {
+    fprintf(stderr,
+        "error: failed to recreate the scene output for \"%s\"\n",
+        output->wlr_output->name);
+    wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+    return false;
+  }
+
+  output->scene_output = scene_output;
+  wlr_scene_output_layout_add_output(
+      hikari_server.scene_layout, l_output, scene_output);
+
+  return true;
+}
+
+void
+hikari_output_detach(struct hikari_output *output)
+{
+  assert(output != NULL);
+
+  if (output->scene_output != NULL) {
+    wlr_scene_output_destroy(output->scene_output);
+    output->scene_output = NULL;
+  }
+
+  wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+
+  /* Action purpose: The bar node is not owned by the output's scene output, so
+  it survives at the coordinates the output has just vacated -- visible again
+  the moment another output is positioned over that region. Only the node is
+  switched off: bar->enabled still governs the usable-area reservation, and
+  hikari_bar_refresh() re-asserts the node on the way back in. */
+  if (output->bar.scene_buffer != NULL) {
+    wlr_scene_node_set_enabled(&output->bar.scene_buffer->node, false);
+  }
+}
+
+void
+hikari_output_set_wants_enabled(
+    struct hikari_output *output, bool wants_enabled)
+{
+  assert(output != NULL);
+
+  if (output->wants_enabled == wants_enabled) {
+    return;
+  }
+
+  if (!wants_enabled) {
+    /* Action purpose: Cleared first so hikari_workspace_next() below skips this
+    output when choosing where the views go. */
+    output->wants_enabled = false;
+
+    evacuate_output(output);
+    destroy_output_nodes(output);
+    hikari_output_disable(output);
+    hikari_output_detach(output);
+    return;
+  }
+
+  if (!hikari_output_attach(output)) {
+    return;
+  }
+
+  output->wants_enabled = true;
+
+  /* Action purpose: Lighting it now would break a blanked lock screen. The flag
+  above is what matters -- enable_outputs() brings it up with the rest on the
+  next keystroke. Same rule hikari_output_init() applies to a monitor connected
+  while locked. */
+  if (!hikari_server_in_lock_mode() ||
+      !hikari_lock_mode_are_outputs_disabled(&hikari_server.lock_mode)) {
+    hikari_output_enable(output);
+  }
+
+  hikari_output_update_geometry(output);
+
+  /* Action purpose: A touch device naming this output was mapped to the whole
+  layout while it was gone, because the lookup skips outputs that are not part
+  of the desktop. Now that it is back, resolve them again. */
+  hikari_server_map_touch_devices();
+
+  struct hikari_output_config *output_config =
+      hikari_configuration_resolve_output_config(
+          hikari_configuration, output->wlr_output->name);
+
+  if (output_config != NULL && output_config->background.value != NULL) {
+    hikari_output_load_background(output,
+        output_config->background.value,
+        output_config->background_fit.value);
+  }
+}
+
 // [COMMENT] Function purpose: Finalize and teardown an output, merging its workspace to another active output.
 void
 hikari_output_fini(struct hikari_output *output)
@@ -662,51 +935,8 @@ hikari_output_fini(struct hikari_output *output)
   struct hikari_workspace *workspace = output->workspace;
 
   if (!noop) {
-    struct hikari_workspace *merge_workspace;
-    struct hikari_workspace *next_workspace = hikari_workspace_next(workspace);
-
-    if (output->background != NULL) {
-      wlr_scene_node_destroy(output->background);
-      output->background = NULL;
-    }
-
-    if (output->lock_indicator_node != NULL) {
-      wlr_scene_node_destroy(&output->lock_indicator_node->node);
-      output->lock_indicator_node = NULL;
-    }
-
-    /* [COMMENT] Action purpose: The lock screen's own nodes go with the output
-    they were drawn for. Both are sized and positioned against this output's
-    geometry, so leaving them parented to the shared lock layer after the output
-    disappears would strand a snapshot of a monitor that is no longer there. */
-    if (output->lock_backdrop_node != NULL) {
-      wlr_scene_node_destroy(&output->lock_backdrop_node->node);
-      output->lock_backdrop_node = NULL;
-    }
-
-    if (output->lock_clock_node != NULL) {
-      wlr_scene_node_destroy(&output->lock_clock_node->node);
-      output->lock_clock_node = NULL;
-    }
-
-    if (workspace != next_workspace) {
-      merge_workspace = next_workspace;
-    } else {
-      merge_workspace = hikari_server.noop_output->workspace;
-    }
-
-    hikari_workspace_merge(workspace, merge_workspace);
-
-    if (!hikari_server_in_lock_mode()) {
-      if (!hikari_server_in_normal_mode()) {
-        hikari_server_enter_normal_mode(NULL);
-      }
-
-      hikari_workspace_focus_view(merge_workspace, NULL);
-    } else {
-      merge_workspace->focus_view = NULL;
-      hikari_server.workspace = merge_workspace;
-    }
+    destroy_output_nodes(output);
+    evacuate_output(output);
 
     wl_list_remove(&output->server_outputs);
   } else {
@@ -766,14 +996,23 @@ hikari_output_move(struct hikari_output *output, double lx, double ly)
                                                                                \
     struct wl_list *name = output->server_outputs.name;                        \
                                                                                \
-    if (name == &hikari_server.outputs) {                                      \
-      name = hikari_server.outputs.name;                                       \
+    while (name != &output->server_outputs) {                                  \
+      if (name == &hikari_server.outputs) {                                    \
+        name = hikari_server.outputs.name;                                     \
+        continue;                                                              \
+      }                                                                        \
+                                                                               \
+      struct hikari_output *name##_output =                                    \
+          wl_container_of(name, name##_output, server_outputs);                \
+                                                                               \
+      if (name##_output->wants_enabled) {                                      \
+        return name##_output;                                                  \
+      }                                                                        \
+                                                                               \
+      name = name->name;                                                       \
     }                                                                          \
                                                                                \
-    struct hikari_output *name##_output =                                      \
-        wl_container_of(name, name##_output, server_outputs);                  \
-                                                                               \
-    return name##_output;                                                      \
+    return output;                                                             \
   }
 
 CYCLE_OUTPUT(next)

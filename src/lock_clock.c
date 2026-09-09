@@ -4,6 +4,8 @@
 
 #include <hikari/lock_clock.h>
 
+#include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -157,14 +159,41 @@ refresh_output(struct hikari_output *output, const struct tm *now)
     return;
   }
 
+  /* Action purpose: Allocate in physical pixels and draw in logical ones, so
+  the clock is rendered at the display's real density instead of being drawn
+  small and upscaled by the scene. */
+  double scale = output->wlr_output->scale > 0 ? output->wlr_output->scale : 1.0;
+
+  /* Action purpose: The scale is client-controlled through output management,
+  and wlroots only rejects a non-positive one -- there is no upper bound, so the
+  product can exceed what an int can hold and converting it would be undefined.
+  Check the doubles before the conversion, not after. */
+  double scaled_width = width * scale;
+  double scaled_height = height * scale;
+
+  if (!isfinite(scaled_width) || !isfinite(scaled_height) ||
+      scaled_width > (double)INT_MAX - 1.0 ||
+      scaled_height > (double)INT_MAX - 1.0) {
+    return;
+  }
+
+  int pixel_width = (int)(scaled_width + 0.5);
+  int pixel_height = (int)(scaled_height + 0.5);
+
+  if (pixel_width <= 0 || pixel_height <= 0) {
+    return;
+  }
+
   cairo_surface_t *surface =
-      cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+      cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
   if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
     cairo_surface_destroy(surface);
     return;
   }
 
   cairo_t *cairo = cairo_create(surface);
+
+  cairo_scale(cairo, scale, scale);
 
   draw_centred(cairo,
       &lock_config->clock_font,
@@ -185,10 +214,10 @@ refresh_output(struct hikari_output *output, const struct tm *now)
   cairo_surface_flush(surface);
 
   unsigned char *data = cairo_image_surface_get_data(surface);
-  int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, width);
+  int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, pixel_width);
 
   struct wlr_buffer *buffer =
-      hikari_buffer_create_argb8888(width, height, data, stride);
+      hikari_buffer_create_argb8888(pixel_width, pixel_height, data, stride);
 
   cairo_destroy(cairo);
   cairo_surface_destroy(surface);
@@ -209,6 +238,8 @@ refresh_output(struct hikari_output *output, const struct tm *now)
   if (output->lock_clock_node == NULL) {
     return;
   }
+
+  wlr_scene_buffer_set_dest_size(output->lock_clock_node, width, height);
 
   /* [COMMENT] Action purpose: Centre horizontally, and sit above the vertical
   centre so the password indicator has room beneath it without the two

@@ -1,26 +1,69 @@
+# Compiled objects and the dependency files that now accompany them. The `.d`
+# files are written by `-MMD -MP` as a side effect of every compile and read
+# back by the `.sinclude` loop at the end of the Makefile -- one per object, so
+# roughly seventy of them appear in the tree root on the first build.
 *.o
+*.d
+
+# Linked binaries. Anchored to the root so that only the build outputs match,
+# never a same-named file somewhere under src/ or share/.
 /hikari
 /hikari-topbar
-hikari-unlocker
-xdg-shell-protocol.h
-hikari.1
-version\.h
-hikari-*.tar.gz
-wlr-layer-shell-unstable-v1-protocol.h
+/hikari-unlocker
 
-.claude/
+# Generated headers. wayland-scanner writes these from protocol/*.xml and from
+# wayland-protocols' own pkgdatadir; the XML is what belongs in the repository.
+/xdg-shell-protocol.h
+/wlr-layer-shell-unstable-v1-protocol.h
 
-# Core dumps
+# Regenerated on every build by the FORCE rule, and never the same twice.
+/version.h
+
+# The roff manual page, generated from share/man/man1/hikari.md by pandoc.
+# Only the markdown source is tracked -- `make install` and `make dist` both
+# build the roff page first, so nothing needs the generated copy committed.
+/share/man/man1/hikari.1
+
+# Release tarballs produced by `make dist`.
+/hikari-*.tar.gz
+
+# Core dumps. Kept out deliberately: they embed the full memory image of a
+# running compositor, which on this project means whatever was on screen.
 *.core
 
 # Agent process docs: machine-specific development notes, not product code.
 # Kept on disk for the AGENTS.md workflow, deliberately not published.
 .devdocs/
+.claude/
 
-# IDE/tooling
+# Editor and language-server state.
+#
+# The two VS Code files that ARE tracked are shared project tooling -- the
+# build tasks and the nested-compositor debug configuration -- so they are
+# re-admitted by name. Everything else VS Code writes into this directory is
+# per-machine (absolute paths, local toolchain locations) and must not be.
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+compile_commands.json
+.cache/
+*.swp
+*~
+.DS_Store
+
+# Merge and patch residue, which is easy to commit by accident after a rebase.
+*.orig
+*.rej
+
+# Captured compositor output. hikari and wlroots both log to stderr, and
+# HIKARI_LOG redirects that to a file -- see "Logging and diagnostics" in
+# README.md.
 hikari.log
-wlroots-0.20.0/
 
 # Captured runtime logs from redirect typos (e.g. `2>1` instead of `2>&1`)
 /1
 /2
+
+# An unpacked wlroots source tree, if one is kept alongside for reference when
+# checking compositor behaviour against the version actually linked.
+wlroots-0.20.0/

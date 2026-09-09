@@ -32,6 +32,7 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
@@ -87,6 +88,7 @@
 #include <hikari/mark.h>
 #include <hikari/memory.h>
 #include <hikari/output.h>
+#include <hikari/output_management.h>
 #include <hikari/platform.h>
 #include <hikari/pointer.h>
 #include <hikari/pointer_config.h>
@@ -166,7 +168,7 @@ find_output_by_name(struct hikari_server *server, const char *name)
   struct hikari_output *output;
 
   wl_list_for_each (output, &server->outputs, server_outputs) {
-    if (!strcmp(output->wlr_output->name, name)) {
+    if (output->wants_enabled && !strcmp(output->wlr_output->name, name)) {
       return output;
     }
   }
@@ -190,6 +192,17 @@ map_touch_to_output(struct hikari_server *server, struct wlr_input_device *devic
   }
 
   wlr_cursor_map_input_to_output(server->cursor.wlr_cursor, device, mapped_output);
+}
+
+void
+hikari_server_map_touch_devices(void)
+{
+  struct hikari_server *server = &hikari_server;
+  struct hikari_touch *touch;
+
+  wl_list_for_each (touch, &server->touches, server_touches) {
+    map_touch_to_output(server, touch->device);
+  }
 }
 
 static void
@@ -360,10 +373,14 @@ new_output_handler(struct wl_listener *listener, void *data)
   // find_output_by_name() lookup fails). Retry every tracked touch device's
   // mapping now that a new output is available, so it gets confined once its
   // named output actually appears.
-  struct hikari_touch *touch;
-  wl_list_for_each (touch, &server->touches, server_touches) {
-    map_touch_to_output(server, touch->device);
-  }
+  hikari_server_map_touch_devices();
+
+  /* Action purpose: Not redundant with the broadcast the layout change already
+  raised. hikari_output_init() adds the output to the layout BEFORE it derives
+  output->geometry from it, so that earlier broadcast reported this output at
+  the zeroed position it had not been given yet. This one reports where it
+  actually is. */
+  hikari_output_management_broadcast();
 }
 
 static bool
@@ -1262,6 +1279,16 @@ output_layout_change_handler(struct wl_listener *listener, void *data)
 
   struct hikari_output *output;
   wl_list_for_each (output, &server->outputs, server_outputs) {
+    /* Action purpose: Membership in the layout, not the desktop flag, decides
+    this. An output with no box would be arranged against a screen that is not
+    there -- but one being attached is in the layout before it is flagged as
+    part of the desktop, and asking the flag would skip the very pass that
+    arranges its layer-shell surfaces. */
+    if (wlr_output_layout_get(server->output_layout, output->wlr_output) ==
+        NULL) {
+      continue;
+    }
+
     struct wlr_output *wlr_output = output->wlr_output;
 
     int old_width = output->geometry.width;
@@ -1327,6 +1354,13 @@ output_layout_change_handler(struct wl_listener *listener, void *data)
     hikari_output_rearrange_xwayland_views(output);
 #endif
   }
+
+  /* Action purpose: Every geometry change a client can observe passes through
+  here, so this is the one place that keeps the advertised output configuration
+  current -- including changes the compositor made itself, which a client has no
+  other way to learn about. Suppressed while an apply is in flight; see
+  src/output_management.c. */
+  hikari_output_management_broadcast();
 }
 
 static bool
@@ -1544,6 +1578,41 @@ session_active_handler(struct wl_listener *listener, void *data)
   }
 }
 
+/* [COMMENT] Function purpose: Establish this desktop's identity in the
+environment, for the session entry that launches the compositor binary directly
+and therefore runs no wrapper script.
+
+Two session entries ship: hikari.desktop execs start-hikari.sh, which exports
+these itself, and hikari-sakura.desktop execs the binary under
+dbus-run-session, which exports nothing. Without this the second entry would
+report whatever the display manager happened to set, or nothing at all, and the
+same desktop would be named differently depending on which entry was picked at
+the login screen.
+
+Every variable is set with overwrite=0, which is the whole design of this
+function: a display manager that already set one did so from the DesktopNames
+of the entry the user actually selected, and that value is authoritative. This
+only fills in what nobody else provided. The wrapper, by contrast, sets its
+copies unconditionally -- it is establishing a known-good environment rather
+than completing someone else's.
+
+Runs before export_activation_environment(), so whatever is settled here is
+what gets published to the D-Bus activation environment.
+
+XDG_CURRENT_DESKTOP is a single name rather than a colon-separated list because
+it is read verbatim by tools that report the running desktop. It is safe to
+drop the ":wlroots" suffix it once carried ONLY because
+share/xdg-desktop-portal/sakura-portals.conf now names the portal backends for
+this desktop directly; that file and this value are a matched pair, and
+removing it silently costs screen sharing. */
+static void
+export_desktop_identity(void)
+{
+  setenv("XDG_CURRENT_DESKTOP", "Sakura", false);
+  setenv("XDG_SESSION_DESKTOP", "Sakura", false);
+  setenv("XDG_SESSION_TYPE", "wayland", false);
+}
+
 static void
 server_init(struct hikari_server *server, char *config_path)
 {
@@ -1608,6 +1677,12 @@ server_init(struct hikari_server *server, char *config_path)
 
   setenv("WAYLAND_DISPLAY", server->socket, true);
 
+  // [COMMENT] Action purpose: Fill in the desktop identity here, beside the
+  // socket name, because this is the point at which the session's environment
+  // becomes real -- and because everything spawned from now on (autostart
+  // entries, the top bar helper, D-Bus activated services) inherits it.
+  export_desktop_identity();
+
   server->compositor =
       wlr_compositor_create(server->display, 5, server->renderer);
 
@@ -1635,6 +1710,11 @@ server_init(struct hikari_server *server, char *config_path)
 
   server->new_output.notify = new_output_handler;
   wl_signal_add(&server->backend->events.new_output, &server->new_output);
+
+  /* Action purpose: After the output layout and the new_output listener, both
+  of which it reports on, and before any output can exist -- so the first
+  broadcast is the one raised by the first output being added. */
+  hikari_output_management_init(server);
 
 #ifdef HAVE_GAMMACONTROL
   wlr_gamma_control_manager_v1_create(server->display);
@@ -1984,6 +2064,8 @@ hikari_server_stop(void)
     wl_event_source_remove(server->sigint_source);
     server->sigint_source = NULL;
   }
+
+  hikari_output_management_fini(server);
 
   wl_list_remove(&server->new_output.link);
   wl_list_remove(&server->new_input.link);

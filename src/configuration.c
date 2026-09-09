@@ -2444,6 +2444,24 @@ hikari_configuration_load(
       if (!parse_layout_policy(configuration, cur)) {
         goto done;
       }
+    } else if (!strcmp(key, "output_management_overrides_config")) {
+      /* Action purpose: The only top-level key that is a value rather than a
+      section, which is why it is handled inline instead of through a parse_*
+      helper. It sits at the top level because it governs neither the interface
+      nor any one output -- putting it in `ui { }` beside `spill` would file a
+      display-authority decision under appearance, and putting it in
+      `outputs { }` is not possible at all, since every key in that block is
+      taken as an output name. */
+      bool overrides;
+
+      if (!ucl_object_toboolean_safe(cur, &overrides)) {
+        fprintf(stderr,
+            "configuration error: expected boolean for "
+            "\"output_management_overrides_config\"\n");
+        goto done;
+      }
+
+      configuration->output_management_overrides_config = overrides;
     } else if (!!strcmp(key, "actions") && !!strcmp(key, "layouts")) {
       fprintf(stderr,
           "configuration error: unkown configuration section \"%s\"\n",
@@ -2515,6 +2533,10 @@ hikari_configuration_reload(char *config_path)
 
     struct hikari_output *output;
     wl_list_for_each (output, &hikari_server.outputs, server_outputs) {
+      if (!output->wants_enabled) {
+        continue;
+      }
+
       struct hikari_view *view;
       wl_list_for_each (view, &output->views, output_views) {
         hikari_view_refresh_geometry(view, view->current_geometry);
@@ -2525,8 +2547,18 @@ hikari_configuration_reload(char *config_path)
               hikari_configuration, output->wlr_output->name);
 
       if (output_config != NULL) {
-        if (output_config->position.value.type ==
-            HIKARI_POSITION_CONFIG_TYPE_ABSOLUTE) {
+        /* Action purpose: Re-assert the configured position only while this
+        file leads. With output management in the lead, a reload that dragged
+        every output back to where `outputs { }` says it should be would
+        silently undo whatever wlr-randr or kanshi had arranged -- and a reload
+        is bound to a key, so it would happen by accident. Reading
+        hikari_configuration here is correct: the incoming configuration was
+        swapped in above, so a reload is governed by its own setting rather than
+        by the one it replaces. Only the position is affected; the background is
+        this compositor's business either way. */
+        if (!hikari_configuration->output_management_overrides_config &&
+            output_config->position.value.type ==
+                HIKARI_POSITION_CONFIG_TYPE_ABSOLUTE) {
           int x = output_config->position.value.config.absolute.x;
           int y = output_config->position.value.config.absolute.y;
 
@@ -2655,6 +2687,14 @@ hikari_configuration_init(struct hikari_configuration *configuration)
   exactly what this setting keeps. ALWAYS remains available for anyone who wants
   the old behaviour back verbatim. */
   configuration->spill = HIKARI_SPILL_DRAG;
+
+  /* Action purpose: true, and it regresses nobody. The only output setting this
+  key can suppress on reload is an absolute `position`, and a position defaults
+  to HIKARI_POSITION_CONFIG_TYPE_AUTO (src/position_config.c) while the shipped
+  configuration sets none at all -- so no existing configuration currently has a
+  position re-applied on reload for this to stop. What it buys is that wlr-randr
+  works out of the box, which is the behaviour anyone installing it expects. */
+  configuration->output_management_overrides_config = true;
 
   configuration->border = 1;
   configuration->gap = 5;
