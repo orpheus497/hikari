@@ -467,6 +467,18 @@ frame_handler(struct wl_listener *listener, void *data)
     wlr_log(WLR_ERROR,
         "frame_handler: wlr_scene_output_commit failed for output %s",
         output->wlr_output->name);
+
+    /* Action purpose: Ask for another frame, or this output never gets one
+    again. No frame-done goes out when the commit fails, so a client throttled
+    on frame callbacks stops committing; with a fullscreen window that client is
+    the only thing damaging the output, so nothing reschedules and the picture
+    is frozen until an unrelated damage source -- in practice moving the pointer
+    across that screen -- happens to wake it.
+
+    The damage survives: wlr_scene clears it from a commit listener, which a
+    failed commit never reaches, so the retry redraws the same region rather
+    than a stale one. */
+    wlr_output_schedule_frame(output->wlr_output);
     return;
   }
 
