@@ -32,6 +32,7 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
@@ -87,6 +88,7 @@
 #include <hikari/mark.h>
 #include <hikari/memory.h>
 #include <hikari/output.h>
+#include <hikari/output_management.h>
 #include <hikari/platform.h>
 #include <hikari/pointer.h>
 #include <hikari/pointer_config.h>
@@ -364,6 +366,13 @@ new_output_handler(struct wl_listener *listener, void *data)
   wl_list_for_each (touch, &server->touches, server_touches) {
     map_touch_to_output(server, touch->device);
   }
+
+  /* Action purpose: Not redundant with the broadcast the layout change already
+  raised. hikari_output_init() adds the output to the layout BEFORE it derives
+  output->geometry from it, so that earlier broadcast reported this output at
+  the zeroed position it had not been given yet. This one reports where it
+  actually is. */
+  hikari_output_management_broadcast();
 }
 
 static bool
@@ -1327,6 +1336,13 @@ output_layout_change_handler(struct wl_listener *listener, void *data)
     hikari_output_rearrange_xwayland_views(output);
 #endif
   }
+
+  /* Action purpose: Every geometry change a client can observe passes through
+  here, so this is the one place that keeps the advertised output configuration
+  current -- including changes the compositor made itself, which a client has no
+  other way to learn about. Suppressed while an apply is in flight; see
+  src/output_management.c. */
+  hikari_output_management_broadcast();
 }
 
 static bool
@@ -1677,6 +1693,11 @@ server_init(struct hikari_server *server, char *config_path)
   server->new_output.notify = new_output_handler;
   wl_signal_add(&server->backend->events.new_output, &server->new_output);
 
+  /* Action purpose: After the output layout and the new_output listener, both
+  of which it reports on, and before any output can exist -- so the first
+  broadcast is the one raised by the first output being added. */
+  hikari_output_management_init(server);
+
 #ifdef HAVE_GAMMACONTROL
   wlr_gamma_control_manager_v1_create(server->display);
 #endif
@@ -2025,6 +2046,8 @@ hikari_server_stop(void)
     wl_event_source_remove(server->sigint_source);
     server->sigint_source = NULL;
   }
+
+  hikari_output_management_fini(server);
 
   wl_list_remove(&server->new_output.link);
   wl_list_remove(&server->new_input.link);

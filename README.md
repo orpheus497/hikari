@@ -239,6 +239,9 @@ The configuration file allows you to define:
   patterns.
 - **inputs**: pointers, keyboards, switches (lid) and trackpad gestures.
 - **outputs**: per-output wallpaper and position.
+- **output\_management\_overrides\_config**: a single top-level `true`/`false`
+  deciding whether `wlr-randr` or this file leads display configuration. See
+  [Display configuration](#display-configuration).
 - **views**: window matching rules (by app ID) to automatically group, float, or
   pin applications to specific sheets.
 - **marks**: single-key marks that focus or spawn a given command.
@@ -257,8 +260,9 @@ The configuration file allows you to define:
   set and there is only ever one `+`).
 - Two things do not reload. The `hikari-topbar` helper is spawned once at
   startup, so `ui { palette }` reaches the bar only on the next compositor
-  start; and `outputs { position }` re-applies on reload only if the value
-  actually changed.
+  start; and `outputs { position }` re-applies on reload only when
+  `output_management_overrides_config` is `false` and the value actually
+  changed.
 - A key written twice is neither merged nor an error — `hikari` uses the
   **first** and ignores the rest, and says so on standard error at startup. If
   a setting appears to do nothing, read that output first. See
@@ -293,6 +297,55 @@ The configuration file allows you to define:
   keyboard when it is focused rather than only once the user interacts with it.
   This affects panels that open keyboard-driven menus; it does not affect
   surfaces that ask for `none` or `exclusive`.
+
+### Display configuration
+
+Hikari Sakura implements `wlr-output-management-unstable-v1`, so display layout,
+resolution, refresh rate, scale and transform can be changed at runtime with any
+client that speaks it — `wlr-randr` on the command line, `kanshi` for profiles
+that follow your monitors around, `wdisplays` for a graphical arrangement.
+
+```sh
+wlr-randr                                        # list outputs and their modes
+wlr-randr --output DP-1 --mode 2560x1440@144
+wlr-randr --output DP-1 --pos 1920,0
+```
+
+Who has the last word is yours to choose, with one top-level key:
+
+```
+output_management_overrides_config = true
+```
+
+`true`, the default, lets those clients lead. Their changes are applied, and
+reloading the configuration no longer drags an output back to the `position`
+written in `outputs { }`. That block still **seeds** a monitor when it first
+appears, so a position you configure is applied on plug-in either way — what
+changes is whether the file keeps asserting it afterwards.
+
+`false` puts the configuration file in charge. Clients may still *read* the
+configuration — `wlr-randr` with no arguments still lists every output and every
+mode it supports, which is the half of it you want when writing a config — but
+anything that would change an output is refused, with the reason logged, and a
+reload re-applies the configured position. Pick this if you would rather the
+display layout lived in one file under version control than in whichever command
+was run last.
+
+Two limits worth knowing:
+
+- It is **one setting for every output**, not one per output. The protocol
+  answers a whole configuration with a single yes or no and offers no way to
+  refuse one monitor out of several, while `wlr-randr` submits every monitor on
+  every invocation — so pinning a single output individually would make every
+  command fail, including ones that never touched it.
+- **Switching an output off is refused** under either setting. Doing it properly
+  means moving that screen's windows somewhere else first, and that is not
+  implemented yet; refusing with a logged reason is better than accepting and
+  leaving windows on a screen you cannot reach.
+
+Persisting a layout across restarts is `kanshi`'s job — it speaks the same
+protocol, so it works with no further setup. The `outputs { }` block itself
+carries only wallpaper and position, not modes.
 
 ### Autostart
 

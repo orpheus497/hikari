@@ -16,6 +16,7 @@
 #include <hikari/color.h>
 #include <hikari/memory.h>
 
+#include <hikari/output_management.h>
 #include <hikari/server.h>
 #ifdef HAVE_XWAYLAND
 #include <hikari/view.h>
@@ -441,6 +442,13 @@ destroy_handler(struct wl_listener *listener, void *data)
 
   hikari_output_fini(output);
   hikari_free(output);
+
+  /* Action purpose: wlroots tears the client-facing head down by itself when
+  the output goes away, but it only marks the manager dirty -- the `done` that
+  tells clients the enumeration has settled is sent on the next publish. Without
+  this an unplugged monitor leaves every output-management client waiting. Runs
+  after the free, so the output is already out of hikari_server.outputs. */
+  hikari_output_management_broadcast();
 }
 
 // [COMMENT] Function purpose: Initialize a new compositor output, allocating workspace and configuring state.

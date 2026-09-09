@@ -1667,6 +1667,44 @@ outputs {
 }
 ```
 
+Runtime display configuration
+-----------------------------
+
+hikari implements *wlr-output-management-unstable-v1*, so position, resolution,
+refresh rate, scale and transform can be changed while the session is running by
+any client speaking it -- **wlr-randr**(1), **kanshi**(1), **wdisplays**(1).
+
+Whether such a client may change anything is decided by a single top level
+configuration key.
+
+* **output\_management\_overrides\_config**
+
+  A boolean, *true* by default.
+
+  *true* lets output management clients lead. Their configurations are applied,
+  and reloading the configuration no longer moves an output back to the
+  *position* set in the *outputs* section. That section still seeds an output
+  when it first appears, so a configured position is applied on plug-in either
+  way; what changes is whether the configuration keeps asserting it afterwards.
+
+  *false* gives the lead to the configuration file. Clients may still read the
+  current configuration -- listing outputs and their supported modes still works
+  -- but every apply and test is refused with the reason logged, and a reload
+  re-applies the configured position.
+
+  This is one setting covering every output rather than one per output. The
+  protocol answers a whole configuration with a single success or failure and
+  has no way to refuse one head out of several, while clients customarily submit
+  every head on every request, so refusing on behalf of a single output would
+  fail requests that did not concern it.
+
+Switching an output off is refused under either setting. Doing so requires
+evacuating that output's views first, which is not yet implemented.
+
+The *outputs* section itself carries wallpaper and position only, so persisting
+a mode or a scale across restarts is a job for **kanshi**(1), which speaks this
+same protocol.
+
 Moving views between outputs
 ----------------------------
 

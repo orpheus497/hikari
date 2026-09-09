@@ -43,6 +43,10 @@ foreign_toplevel.c pulls in the zwlr-foreign-toplevel-management header. A
 pointer to an incomplete type is all hikari_server needs to hold. */
 struct wlr_foreign_toplevel_manager_v1;
 
+/* [COMMENT] Class purpose: Forward-declared for the same reason -- only
+src/output_management.c needs the wlr-output-management header. */
+struct wlr_output_manager_v1;
+
 struct hikari_output;
 struct hikari_group;
 
@@ -224,6 +228,23 @@ struct hikari_server {
     bool mod_changed;
     bool mod_pressed;
   } keyboard_state;
+
+  /* [COMMENT] Class purpose: zwlr_output_manager_v1 -- runtime display
+  configuration for wlr-randr, kanshi and wdisplays. NULL when the global could
+  not be created, in which case the session runs and only that feature is
+  missing. See src/output_management.c.
+
+  Note this is NOT `output_manager` above, which is the xdg-output manager: that
+  one only ADVERTISES logical geometry to clients and cannot be driven. */
+  struct wlr_output_manager_v1 *output_management;
+  struct wl_listener output_management_test;
+  struct wl_listener output_management_apply;
+
+  /* [COMMENT] Class purpose: Set for the duration of one client apply, so the
+  several layout changes it produces yield one broadcast at the end rather than
+  one apiece. Each broadcast that reports a real change takes a new serial, and
+  a new serial cancels every other client's in-flight configuration. */
+  bool output_management_applying;
 };
 
 extern struct hikari_server hikari_server;

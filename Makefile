@@ -74,6 +74,7 @@ OBJS = \
 	normal_mode.o \
 	output.o \
 	output_config.o \
+	output_management.o \
 	platform.o \
 	pointer.o \
 	pointer_config.o \
