@@ -1777,7 +1777,7 @@ none is placed on the output holding the focused workspace. Each of the
 protocol's four layers is a separate part of the scene graph, and views sit
 between them. The full order, back to front, is:
 
-```
+```text
 background -- bottom -- views -- top -- fullscreen -- overlay -- lock
 ```
 
@@ -1792,10 +1792,12 @@ override-redirect surfaces (menus, tooltips and dropdowns from XWayland
 clients) are promoted into the same band, above the fullscreen views within it,
 so a menu belonging to a fullscreen window is not buried under it.
 
-Nothing from any layer is shown over the lock screen: entering lock mode
-disables every band above *background*, and disabling a scene node disables
-everything inside it, so a surface mapped after the lock began is invisible for
-the same reason.
+Nothing from any layer is shown over the lock screen. Entering lock mode
+disables *bottom*, *views*, *top*, *fullscreen* and *overlay*, and disabling a
+scene node disables everything inside it, so a surface mapped after the lock
+began is invisible for the same reason. The two bands left enabled are
+*background*, so the wallpaper still shows behind the lock screen, and *lock*
+itself, which is what the lock screen is drawn on.
 
 The usable area
 ---------------
@@ -2142,12 +2144,19 @@ ENVIRONMENT
   list, because everything that reports the running desktop reads the variable
   verbatim.
 
-  Set in two places, so that both session entries agree. **start-hikari**
-  exports them unconditionally, establishing a known-good environment; the
-  compositor itself also sets them, and **XDG\_SESSION\_TYPE**, without
-  overwriting a value that is already present -- so a display manager's own
-  value, taken from the chosen entry's *DesktopNames*, stays authoritative and
-  the wrapperless entry is still named correctly.
+  Set in two places, so that both session entries agree, and the precedence
+  differs between them by design.
+
+  The compositor sets these two and **XDG\_SESSION\_TYPE** itself, but only when
+  they are not already set, so on the wrapperless entry a display manager's own
+  value -- taken from the chosen entry's *DesktopNames* -- is left alone, and
+  the session is still named correctly when nothing set it at all.
+
+  **start-hikari** exports them unconditionally, so on that entry the wrapper's
+  value wins over whatever the display manager set. That is deliberate: the
+  script exists to establish a known-good environment, and every session entry
+  that runs it declares this same desktop, so there is no value it could be
+  overriding that was meant to survive.
 
   The name once carried a *:wlroots* suffix, because the portal backend was
   selected by matching this variable against the *UseIn=* field of
