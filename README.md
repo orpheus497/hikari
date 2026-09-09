@@ -53,7 +53,7 @@ second half of its name from the display manager:
 | Project | Written in | Role |
 | --- | --- | --- |
 | [**sakura**](https://github.com/orpheus497/sakura) | Zig | **The display manager.** A TUI login manager built exclusively for FreeBSD: it runs on a virtual terminal, talks to OpenPAM directly, and needs no graphical toolkit, session bus or login-manager framework. It comes first, and it is what hands the machine over to the rest. |
-| [**sofi**](https://github.com/orpheus497/sofi) | C | **The shell — everything summoned rather than always present.** Application menu, task strip, sheet switcher, notification daemon and history, message toasts and a system tray host, from one binary. The name is an acronym: **S**akura **O**fficial **F**ull **I**ndexer. |
+| [**sofi**](https://github.com/orpheus497/sofi) | C | **The shell — everything summoned rather than always present.** Control panel, application menu, sheet switcher, volume and network panes, notification daemon and history, and message toasts, from one binary. The name is an acronym: **S**akura **O**fficial **F**ull **I**ndexer. |
 | [**saber**](https://github.com/orpheus497/saber) | C | **The panel — the one surface that is always there.** A persistent vertical launcher in the tradition of the Unity 7 launcher: running indicators, quicklists, application dash, window spread, system tray and session controls, in one always-present column. FreeBSD only, and written for this compositor alone. |
 
 `sofi` and `saber` complement rather than duplicate each other, and the
@@ -64,13 +64,15 @@ on screen for the whole session and **reserves an exclusive zone**, so windows
 tile beside it rather than under it — aimed at without looking, showing at a
 glance what is running.
 
-The one place they overlap is the system tray, and it is an either/or rather
-than a duplication: exactly one process on a session bus can own
-`org.kde.StatusNotifierWatcher`. Run one tray host, not both — see
-[Autostart](#autostart). Notifications are `sofi`'s either way, and all the
-system telemetry — CPU, RAM, temperature, network, battery, volume, media and
-the clock — stays in this compositor's own [top bar](#the-top-bar), which
-neither of them duplicates.
+**The persistent system tray is `saber`'s.** `sofi` keeps a `-tray-daemon` for
+sessions that do not run `saber`, but it draws no surface of its own — so run
+one tray host, not both: exactly one process on a session bus can own
+`org.kde.StatusNotifierWatcher`. See [Autostart](#autostart).
+
+Notifications are `sofi`'s either way. The *status readout* — CPU, RAM,
+temperature, network, battery, volume, media and the clock — belongs to this
+compositor's own [top bar](#the-top-bar) and is duplicated by neither of them;
+`sofi`'s volume and network panes are summoned **controls**, not a readout.
 
 All three are optional — Hikari Sakura runs on its own, and any layer-shell
 client (`waybar`, `wofi`, `mako`) or display manager (GDM, SDDM, greetd) works
@@ -79,10 +81,16 @@ in their place.
 They are, however, what the defaults assume:
 
 * **The shipped configuration binds four keys to `sofi`** —
-  `L+Space` (application menu), `L+w` (task and window manager), `L+e` (sheet
-  switcher) and `L+n` (notification history). Without `sofi` installed those
-  four bindings do nothing. Either install it or rebind the corresponding
-  `actions` entries in `hikari.conf`.
+  `L+Space` (application menu), `L+w` (the control panel, which is the entry
+  point to every other sofi surface), `L+e` (sheet switcher) and `L+n`
+  (notification history). Without `sofi` installed those four bindings do
+  nothing. Either install it or rebind the corresponding `actions` entries in
+  `hikari.conf`.
+* **`sofi` has more surfaces than the four bound here** — volume, network, a
+  key-binding reference and a window switcher (`sofi -show windowlist`) among
+  them. All are reachable from the control panel on `L+w`, and any of them can
+  be given a key of its own by adding an `actions` entry. The four bound by
+  default are simply the ones worth a dedicated key.
 * **`sofi` needs `zwlr_layer_shell_v1` at version 4**, which this compositor
   offers. Version 4 is where `on_demand` keyboard interactivity arrived, and
   `sofi`'s notification daemon relies on it to avoid stealing focus. Note the
@@ -298,11 +306,16 @@ saber &
 sofi -notification-daemon &
 ```
 
-If you run `saber`, do **not** also run `sofi -tray-daemon`. Both are system
-tray hosts, and exactly one process on a session bus can own
-`org.kde.StatusNotifierWatcher` — the second to start finds the name taken and
-its tray stays empty. Notifications are unaffected: `sofi -notification-daemon`
-and `sofi -show notification-history` should keep running either way.
+If you run `saber`, do **not** also run `sofi -tray-daemon`. Both claim
+`org.kde.StatusNotifierWatcher`, and exactly one process on a session bus can
+own it — the second to start finds the name taken and its tray stays empty.
+`saber` is the one that draws a persistent tray; `sofi -tray-daemon` has no
+surface of its own and exists for sessions that do not run `saber`. So run it
+only if you are not running `saber`.
+
+Notifications are unaffected either way: `sofi -notification-daemon` and
+`sofi -show notification-history` should keep running whichever tray host you
+choose.
 
 `hikari -a <executable>` overrides the path for a single run.
 

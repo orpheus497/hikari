@@ -38,12 +38,13 @@ and configured independently:
   <https://github.com/orpheus497/sakura>
 
 * **sofi** -- the shell, and everything summoned rather than always present. One
-  binary providing the application menu, task strip, sheet switcher,
-  notification daemon and history, system tray host and message toasts. Under
+  binary providing the control panel, application menu, sheet switcher, volume
+  and network panes, notification daemon and history, and message toasts. Under
   this compositor each is a *zwlr\_layer\_shell\_v1* surface, bound at version 4;
   sofi also has *xcb* and *xdg-shell* fallbacks for other environments. The
-  default configuration binds four keys to it, and its sheet switcher is a
-  client of the control socket described under **CONTROL SOCKET**.
+  default configuration binds four keys to it -- the control panel on *L+w* is
+  the entry point to the surfaces that have no key of their own -- and its sheet
+  switcher is a client of the control socket described under **CONTROL SOCKET**.
   <https://github.com/orpheus497/sofi>
 
 * **saber** -- the panel, and the one surface that is always there. A persistent
@@ -57,10 +58,11 @@ and configured independently:
 
 **sofi** and **saber** divide by persistence: every sofi surface is summoned,
 does one job and dismisses, reserving no space; saber stays for the whole
-session and reserves its column. They overlap only on the system tray, where
-exactly one process on a session bus may own *org.kde.StatusNotifierWatcher* --
-so run one tray host, not both. All system telemetry stays in this compositor's
-own top bar and is duplicated by neither.
+session and reserves its column. The persistent system tray is saber's --
+**sofi -tray-daemon** is retained for sessions without saber and draws no
+surface of its own -- and since exactly one process on a session bus may own
+*org.kde.StatusNotifierWatcher*, run one tray host, not both. The system status
+readout stays in this compositor's own top bar and is duplicated by neither.
 
 Neither is required: **hikari** runs on its own, and any layer-shell client or
 display manager works in their place.
@@ -1737,7 +1739,9 @@ none is placed on the output holding the focused workspace. Each of the
 protocol's four layers is a separate part of the scene graph, and views sit
 between them. The full order, back to front, is:
 
-    background -- bottom -- views -- top -- fullscreen -- overlay -- lock
+```
+background -- bottom -- views -- top -- fullscreen -- overlay -- lock
+```
 
 *background* and *bottom* are painted below every window; *top* and *overlay*
 above them. The band worth knowing about is **fullscreen**, which sits between
