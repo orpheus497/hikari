@@ -27,21 +27,40 @@ Besides managing windows, **hikari** draws its own top bar and its own screen
 locker in-process; both are themed from the same *palette* as everything else.
 See **TOP BAR** and the *Lock screen* section below.
 
-The desktop environment is completed by two sibling projects, each installed
+The desktop environment is completed by three sibling projects, each installed
 and configured independently:
-
-* **sofi** -- the shell. One binary providing the application menu, task strip,
-  sheet switcher, notification daemon and history, system tray host and message
-  toasts, each as a *zwlr\_layer\_shell\_v1* surface. The default configuration
-  binds four keys to it, and its sheet switcher is a client of the control
-  socket described under **CONTROL SOCKET**.
-  <https://github.com/orpheus497/sofi>
 
 * **sakura** -- the display manager, and the source of the second half of the
   desktop's name. A FreeBSD-only TUI login manager that runs on a virtual
-  terminal and talks to OpenPAM directly. It launches this compositor through
-  the installed *hikari.desktop* session entry.
+  terminal and talks to OpenPAM directly, needing no graphical toolkit, session
+  bus or login-manager framework. It launches this compositor through either of
+  the two installed session entries; see **FILES**.
   <https://github.com/orpheus497/sakura>
+
+* **sofi** -- the shell, and everything summoned rather than always present. One
+  binary providing the application menu, task strip, sheet switcher,
+  notification daemon and history, system tray host and message toasts. Under
+  this compositor each is a *zwlr\_layer\_shell\_v1* surface, bound at version 4;
+  sofi also has *xcb* and *xdg-shell* fallbacks for other environments. The
+  default configuration binds four keys to it, and its sheet switcher is a
+  client of the control socket described under **CONTROL SOCKET**.
+  <https://github.com/orpheus497/sofi>
+
+* **saber** -- the panel, and the one surface that is always there. A persistent
+  vertical launcher in the tradition of the Unity 7 launcher, carrying running
+  indicators, quicklists, an application dash, a window spread, the system tray
+  and session controls in one always-present column. It reserves an exclusive
+  zone, so views tile beside it rather than under it, and it reads the
+  compositor's sheets over the same control socket. FreeBSD only, and written
+  for this compositor alone. The default configuration binds three keys to it.
+  <https://github.com/orpheus497/saber>
+
+**sofi** and **saber** divide by persistence: every sofi surface is summoned,
+does one job and dismisses, reserving no space; saber stays for the whole
+session and reserves its column. They overlap only on the system tray, where
+exactly one process on a session bus may own *org.kde.StatusNotifierWatcher* --
+so run one tray host, not both. All system telemetry stays in this compositor's
+own top bar and is duplicated by neither.
 
 Neither is required: **hikari** runs on its own, and any layer-shell client or
 display manager works in their place.
@@ -1716,9 +1735,25 @@ compositor honours the request.
 A layer surface names the output it wants and is placed there; one that names
 none is placed on the output holding the focused workspace. Each of the
 protocol's four layers is a separate part of the scene graph, and views sit
-between them -- *background* and *bottom* are painted below every window,
-*top* and *overlay* above them. Nothing from any layer is shown over the lock
-screen.
+between them. The full order, back to front, is:
+
+    background -- bottom -- views -- top -- fullscreen -- overlay -- lock
+
+*background* and *bottom* are painted below every window; *top* and *overlay*
+above them. The band worth knowing about is **fullscreen**, which sits between
+the two upper layers: a view entering fullscreen is promoted into it, so it
+covers a panel on *top* but **not** a surface on *overlay*. A client picks its
+own layer, so that choice is what decides whether a fullscreen window covers it
+-- **saber**, for instance, puts its panel on *top* and its dash and window
+spread on *overlay*, and is covered on one and not the other. X11
+override-redirect surfaces (menus, tooltips and dropdowns from XWayland
+clients) are promoted into the same band, above the fullscreen views within it,
+so a menu belonging to a fullscreen window is not buried under it.
+
+Nothing from any layer is shown over the lock screen: entering lock mode
+disables every band above *background*, and disabling a scene node disables
+everything inside it, so a surface mapped after the lock began is invisible for
+the same reason.
 
 The usable area
 ---------------
@@ -1994,7 +2029,27 @@ FILES
 
 * *${PREFIX}/share/wayland-sessions/hikari.desktop*
 
-  Session entry read by display managers.
+  Session entry read by display managers, shown as **Hikari**. Runs
+  **start-hikari**, the session wrapper script.
+
+* *${PREFIX}/share/wayland-sessions/hikari-sakura.desktop*
+
+  Second session entry, shown as **Hikari Sakura**. Runs
+  **dbus-run-session hikari** -- the compositor binary, with only the session
+  message bus placed in front of it. Both entries declare
+  *DesktopNames=Sakura*, so the desktop reports the same name whichever is
+  chosen.
+
+* *${PREFIX}/share/xdg-desktop-portal/sakura-portals.conf*
+
+  Portal backend map, naming *wlr* for **Screenshot** and **ScreenCast** and
+  falling back to *gtk* for every other interface. Required: without it,
+  backend selection falls back to matching **XDG\_CURRENT\_DESKTOP** against the
+  *UseIn=* field of **xdg-desktop-portal-wlr**'s portal file, which lists no
+  Sakura name -- so screen sharing silently finds no provider. Its filename is
+  derived from **XDG\_CURRENT\_DESKTOP**, lower-cased, and so is coupled to the
+  *DesktopNames* of both session entries. Requires xdg-desktop-portal 1.17 or
+  newer, where *portals.conf* was introduced.
 
 * *${PREFIX}/share/backgrounds/hikari/hikari\_wallpaper.png*
 
@@ -2039,14 +2094,25 @@ ENVIRONMENT
   Fallback keyboard configuration for keyboards with no entry in the *keyboards*
   section. Read once at startup; see **INPUTS**.
 
-* **XDG\_CURRENT\_DESKTOP**
+* **XDG\_CURRENT\_DESKTOP**, **XDG\_SESSION\_DESKTOP**
 
-  Set by **start-hikari** to *Hikari Sakura:wlroots*. Both entries matter: the
-  first is this desktop's own identity and matches *hikari.desktop*'s
-  *DesktopNames*, and the second is what **xdg-desktop-portal-wlr** lists in its
-  portal file's *UseIn=* field. Without the generic name no portal backend
-  matches at all, and screen sharing finds no provider even though the
-  compositor advertises the capture protocols.
+  This desktop's name, *Sakura*. A single name rather than a colon-separated
+  list, because everything that reports the running desktop reads the variable
+  verbatim.
+
+  Set in two places, so that both session entries agree. **start-hikari**
+  exports them unconditionally, establishing a known-good environment; the
+  compositor itself also sets them, and **XDG\_SESSION\_TYPE**, without
+  overwriting a value that is already present -- so a display manager's own
+  value, taken from the chosen entry's *DesktopNames*, stays authoritative and
+  the wrapperless entry is still named correctly.
+
+  The name once carried a *:wlroots* suffix, because the portal backend was
+  selected by matching this variable against the *UseIn=* field of
+  **xdg-desktop-portal-wlr**'s portal file. That coupling is gone:
+  *sakura-portals.conf* names the backends directly. The two are a matched
+  pair -- dropping the suffix without installing that file leaves screen
+  sharing with no provider and nothing logged to say why. See **FILES**.
 
 * **DBUS\_SESSION\_BUS\_ADDRESS**
 
@@ -2075,5 +2141,6 @@ SEE ALSO
 backlight(8), mixer(8), devd(8), acpi(4)
 
 * Hikari Sakura -- <https://github.com/orpheus497/hikari-sakura>
-* sofi, the shell -- <https://github.com/orpheus497/sofi>
 * sakura, the display manager -- <https://github.com/orpheus497/sakura>
+* sofi, the shell -- <https://github.com/orpheus497/sofi>
+* saber, the panel -- <https://github.com/orpheus497/saber>
