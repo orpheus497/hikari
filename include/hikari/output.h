@@ -85,6 +85,14 @@ void
 hikari_output_set_wants_enabled(
     struct hikari_output *output, bool wants_enabled);
 
+/* Function purpose: The layout and scene half of the above, on its own, for the
+one caller that has to render a frame between the two halves. */
+bool
+hikari_output_attach(struct hikari_output *output);
+
+void
+hikari_output_detach(struct hikari_output *output);
+
 /* Function purpose: Re-derive an output's geometry, usable area, bar
 reservation and background placement from the output layout. The single entry
 point for that -- output init and the layout-change handler both call it, so a

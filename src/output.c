@@ -332,6 +332,23 @@ hikari_output_enable(struct hikari_output *output)
   struct wlr_output_state state;
   wlr_output_state_init(&state);
   wlr_output_state_set_enabled(&state, true);
+
+  /* Action purpose: An atomic modeset scans out of the primary plane, and
+  wlroots only borrows the plane's existing framebuffer when the state carries
+  none. An output that was fully torn down -- or that never came up -- has no
+  such framebuffer, and the commit is then refused however valid the mode is.
+  Setting a mode and rendering one frame from the scene supplies both. */
+  if (wlr_output->current_mode == NULL) {
+    struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
+    if (mode != NULL) {
+      wlr_output_state_set_mode(&state, mode);
+    }
+  }
+
+  if (output->scene_output != NULL) {
+    wlr_scene_output_build_state(output->scene_output, &state, NULL);
+  }
+
   if (!wlr_output_commit_state(wlr_output, &state)) {
     wlr_output_state_finish(&state);
     return;
@@ -751,6 +768,76 @@ evacuate_output(struct hikari_output *output)
   }
 }
 
+/* Function purpose: Give an output its place in the layout and a scene output,
+without touching the CRTC.
+
+Separate from enabling it because the order is forced: a mode-setting commit
+needs a framebuffer, the only way to produce one is to render a frame, and
+rendering a frame needs the scene output to exist first. */
+bool
+hikari_output_attach(struct hikari_output *output)
+{
+  assert(output != NULL);
+
+  if (output->scene_output != NULL) {
+    return true;
+  }
+
+  /* Action purpose: geometry still holds the box this output had when it was
+  last part of the layout, so it comes back where it left. */
+  struct wlr_output_layout_output *l_output =
+      wlr_output_layout_add(hikari_server.output_layout,
+          output->wlr_output,
+          output->geometry.x,
+          output->geometry.y);
+
+  if (l_output == NULL) {
+    fprintf(stderr,
+        "error: failed to add output \"%s\" back to the output layout\n",
+        output->wlr_output->name);
+    return false;
+  }
+
+  struct wlr_scene_output *scene_output =
+      wlr_scene_output_create(hikari_server.scene, output->wlr_output);
+
+  if (scene_output == NULL) {
+    fprintf(stderr,
+        "error: failed to recreate the scene output for \"%s\"\n",
+        output->wlr_output->name);
+    wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+    return false;
+  }
+
+  output->scene_output = scene_output;
+  wlr_scene_output_layout_add_output(
+      hikari_server.scene_layout, l_output, scene_output);
+
+  return true;
+}
+
+void
+hikari_output_detach(struct hikari_output *output)
+{
+  assert(output != NULL);
+
+  if (output->scene_output != NULL) {
+    wlr_scene_output_destroy(output->scene_output);
+    output->scene_output = NULL;
+  }
+
+  wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+
+  /* Action purpose: The bar node is not owned by the output's scene output, so
+  it survives at the coordinates the output has just vacated -- visible again
+  the moment another output is positioned over that region. Only the node is
+  switched off: bar->enabled still governs the usable-area reservation, and
+  hikari_bar_refresh() re-asserts the node on the way back in. */
+  if (output->bar.scene_buffer != NULL) {
+    wlr_scene_node_set_enabled(&output->bar.scene_buffer->node, false);
+  }
+}
+
 void
 hikari_output_set_wants_enabled(
     struct hikari_output *output, bool wants_enabled)
@@ -769,55 +856,13 @@ hikari_output_set_wants_enabled(
     evacuate_output(output);
     destroy_output_nodes(output);
     hikari_output_disable(output);
-
-    if (output->scene_output != NULL) {
-      wlr_scene_output_destroy(output->scene_output);
-      output->scene_output = NULL;
-    }
-
-    wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
-
-    /* Action purpose: The bar node is not owned by the output's scene output,
-    so it survives at the coordinates the output has just vacated -- visible
-    again the moment another output is positioned over that region. Only the
-    node is switched off: bar->enabled still governs the usable-area
-    reservation, and hikari_bar_refresh() re-asserts the node on the way back
-    in. */
-    if (output->bar.scene_buffer != NULL) {
-      wlr_scene_node_set_enabled(&output->bar.scene_buffer->node, false);
-    }
+    hikari_output_detach(output);
     return;
   }
 
-  /* Action purpose: geometry still holds the box this output had when it was
-  last part of the layout, so it comes back where it left. */
-  struct wlr_output_layout_output *l_output =
-      wlr_output_layout_add(hikari_server.output_layout,
-          output->wlr_output,
-          output->geometry.x,
-          output->geometry.y);
-
-  if (l_output == NULL) {
-    fprintf(stderr,
-        "error: failed to add output \"%s\" back to the output layout\n",
-        output->wlr_output->name);
+  if (!hikari_output_attach(output)) {
     return;
   }
-
-  struct wlr_scene_output *scene_output =
-      wlr_scene_output_create(hikari_server.scene, output->wlr_output);
-
-  if (scene_output == NULL) {
-    fprintf(stderr,
-        "error: failed to recreate the scene output for \"%s\"\n",
-        output->wlr_output->name);
-    wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
-    return;
-  }
-
-  output->scene_output = scene_output;
-  wlr_scene_output_layout_add_output(
-      hikari_server.scene_layout, l_output, scene_output);
 
   output->wants_enabled = true;
 

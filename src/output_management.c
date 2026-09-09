@@ -16,6 +16,8 @@ modes a monitor has, but every apply and test is refused. */
 #include <wlr/backend.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_output_management_v1.h>
+#include <wlr/types/wlr_output_swapchain_manager.h>
+#include <wlr/types/wlr_scene.h>
 #include <wlr/util/log.h>
 
 #include <hikari/configuration.h>
@@ -86,12 +88,94 @@ configuration_apply(struct wlr_output_configuration_v1 *config, bool test_only)
     return false;
   }
 
-  bool success = wlr_backend_test(hikari_server.backend, states, states_len);
+  /* Action purpose: Allocating swapchains IS the test, and a plain
+  wlr_backend_test() is not a substitute.
 
-  if (success && !test_only) {
-    success = wlr_backend_commit(hikari_server.backend, states, states_len);
+  Turning an output on is a mode-setting commit, and one of those scans out of
+  the primary plane. wlroots borrows the plane's existing framebuffer when the
+  state carries none -- but an output that has been switched off no longer has
+  one, so the commit is refused however valid the mode is. Testing and
+  committing without allocating first therefore made "off" a one-way door: every
+  configuration that turned an output on failed, while every configuration that
+  kept it off succeeded.
+
+  This helper allocates a swapchain per output for the configuration being
+  tried, which is both the feasibility question and the thing that produces the
+  framebuffer the commit then needs. */
+  struct wlr_output_swapchain_manager swapchains;
+  wlr_output_swapchain_manager_init(&swapchains, hikari_server.backend);
+
+  bool success =
+      wlr_output_swapchain_manager_prepare(&swapchains, states, states_len);
+
+  if (!success || test_only) {
+    goto out;
   }
 
+  /* Action purpose: Outputs coming on need their scene output before the loop
+  below, because that is what the frame is rendered from. Only the layout and
+  scene halves happen here -- the CRTC is left alone until the backend commit,
+  so a refused configuration leaves nothing lit. */
+  size_t attached = 0;
+  for (; attached < states_len; attached++) {
+    struct hikari_output *output = states[attached].output->data;
+
+    if (output == NULL || !states[attached].base.enabled ||
+        output->wants_enabled) {
+      continue;
+    }
+
+    if (!hikari_output_attach(output)) {
+      success = false;
+      break;
+    }
+  }
+
+  if (!success) {
+    for (size_t i = 0; i < attached; i++) {
+      struct hikari_output *output = states[i].output->data;
+
+      if (output != NULL && states[i].base.enabled && !output->wants_enabled) {
+        hikari_output_detach(output);
+      }
+    }
+    goto out;
+  }
+
+  /* Action purpose: Render one frame of the new configuration into the
+  swapchain allocated for it, so the commit below has something to scan out. */
+  for (size_t i = 0; i < states_len; i++) {
+    if (!states[i].base.enabled) {
+      continue;
+    }
+
+    struct hikari_output *output = states[i].output->data;
+
+    if (output == NULL || output->scene_output == NULL) {
+      continue;
+    }
+
+    struct wlr_swapchain *swapchain =
+        wlr_output_swapchain_manager_get_swapchain(
+            &swapchains, states[i].output);
+
+    if (swapchain == NULL) {
+      continue;
+    }
+
+    struct wlr_scene_output_state_options options = { .swapchain = swapchain };
+    wlr_scene_output_build_state(
+        output->scene_output, &states[i].base, &options);
+  }
+
+  success = wlr_backend_commit(hikari_server.backend, states, states_len);
+
+  if (success) {
+    wlr_output_swapchain_manager_apply(&swapchains);
+  }
+
+out:
+  wlr_output_swapchain_manager_finish(&swapchains);
   destroy_states(states, states_len);
 
   if (test_only || !success) {
