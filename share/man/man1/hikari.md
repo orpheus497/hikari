@@ -1698,8 +1698,13 @@ configuration key.
   every head on every request, so refusing on behalf of a single output would
   fail requests that did not concern it.
 
-Switching an output off is refused under either setting. Doing so requires
-evacuating that output's views first, which is not yet implemented.
+Switching an output off evacuates its views to another output, drops its scene
+output and removes it from the output layout, so nothing is arranged against a
+screen that is not being painted. Switching it back on restores it at the
+position it held; the views stay where they were moved, as they do when a
+monitor is unplugged and reconnected. The lock screen's blank timer is a
+separate thing and does not disturb this -- unlocking relights only the outputs
+that were part of the desktop to begin with.
 
 The *outputs* section itself carries wallpaper and position only, so persisting
 a mode or a scale across restarts is a job for **kanshi**(1), which speaks this

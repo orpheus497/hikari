@@ -47,12 +47,9 @@ Both refusals reject the WHOLE configuration, because the protocol offers no way
 to refuse part of one: zwlr_output_configuration_v1 carries a single
 succeeded/failed reply covering every head it was given.
 
-The disable refusal is deliberate and temporary. Turning an output off means
-evacuating its windows, destroying its scene output and removing it from the
-output layout; none of that exists yet, and accepting the request without it
-would leave every window on that screen unreachable while the compositor kept
-tiling into a rectangle nothing paints. Refusing with a reason in the log is the
-honest interim answer. */
+It rejects the WHOLE configuration, because the protocol offers no way to refuse
+part of one: zwlr_output_configuration_v1 carries a single succeeded/failed
+reply covering every head it was given. */
 static bool
 configuration_is_permitted(struct wlr_output_configuration_v1 *config)
 {
@@ -62,17 +59,6 @@ configuration_is_permitted(struct wlr_output_configuration_v1 *config)
         "\"output_management_overrides_config\" is false, so this "
         "compositor's own configuration leads");
     return false;
-  }
-
-  struct wlr_output_configuration_head_v1 *config_head;
-  wl_list_for_each (config_head, &config->heads, link) {
-    if (!config_head->state.enabled) {
-      wlr_log(WLR_INFO,
-          "output management: refusing a client configuration -- switching "
-          "output \"%s\" off is not implemented yet",
-          config_head->state.output->name);
-      return false;
-    }
   }
 
   return true;
@@ -123,10 +109,25 @@ configuration_apply(struct wlr_output_configuration_v1 *config, bool test_only)
   actually move are skipped so a one-monitor change does not drag every other
   screen through that pass. Their geometry is already current here: a mode
   change raises the same event from inside the commit above, before this
-  runs. */
+  runs.
+
+  A head that is not enabled carries no position to apply. The protocol has no
+  request that sets one on a disabled head, so wlroots allocates the head
+  zeroed and fills in only the output and the flag -- meaning its x and y read
+  as 0 rather than as "unchanged". Moving an output to the layout origin
+  because a client mentioned it while it was off is not what was asked for, and
+  on a multi-monitor layout it would drag the others with it. */
   struct wlr_output_configuration_head_v1 *config_head;
   wl_list_for_each (config_head, &config->heads, link) {
     struct hikari_output *output = config_head->state.output->data;
+
+    if (output != NULL) {
+      hikari_output_set_wants_enabled(output, config_head->state.enabled);
+    }
+
+    if (!config_head->state.enabled) {
+      continue;
+    }
 
     if (output != NULL && output->geometry.x == config_head->state.x &&
         output->geometry.y == config_head->state.y) {

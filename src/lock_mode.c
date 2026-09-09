@@ -575,7 +575,12 @@ enable_outputs(void)
 
   struct hikari_output *output;
   wl_list_for_each (output, &hikari_server.outputs, server_outputs) {
-    hikari_output_enable(output);
+    /* Action purpose: The blank only ever took the lit outputs down, so only
+    those come back. An output switched off through output management is not
+    part of the desktop and must not be relit by unlocking it. */
+    if (output->wants_enabled) {
+      hikari_output_enable(output);
+    }
   }
 
   mode->outputs_disabled = false;
@@ -765,8 +770,10 @@ cancel(void)
 
   struct hikari_output *output;
   wl_list_for_each (output, &hikari_server.outputs, server_outputs) {
-    hikari_output_enable(output);
-    hikari_output_damage_whole(output);
+    if (output->wants_enabled) {
+      hikari_output_enable(output);
+      hikari_output_damage_whole(output);
+    }
   }
 
   hikari_lock_indicator_fini(mode->lock_indicator);

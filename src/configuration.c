@@ -2533,6 +2533,10 @@ hikari_configuration_reload(char *config_path)
 
     struct hikari_output *output;
     wl_list_for_each (output, &hikari_server.outputs, server_outputs) {
+      if (!output->wants_enabled) {
+        continue;
+      }
+
       struct hikari_view *view;
       wl_list_for_each (view, &output->views, output_views) {
         hikari_view_refresh_geometry(view, view->current_geometry);

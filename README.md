@@ -338,10 +338,11 @@ Two limits worth knowing:
   refuse one monitor out of several, while `wlr-randr` submits every monitor on
   every invocation — so pinning a single output individually would make every
   command fail, including ones that never touched it.
-- **Switching an output off is refused** under either setting. Doing it properly
-  means moving that screen's windows somewhere else first, and that is not
-  implemented yet; refusing with a logged reason is better than accepting and
-  leaving windows on a screen you cannot reach.
+- **Switching an output off** moves that screen's windows to another output
+  first, and takes it out of the layout so nothing tiles into a dark rectangle.
+  Switching it back on returns it to where it was; the windows stay where they
+  went, exactly as when a monitor is unplugged and replugged. A lock and unlock
+  does not relight an output you switched off.
 
 Persisting a layout across restarts is `kanshi`'s job — it speaks the same
 protocol, so it works with no further setup. The `outputs { }` block itself

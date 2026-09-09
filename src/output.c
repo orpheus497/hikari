@@ -483,6 +483,7 @@ hikari_output_init(struct hikari_output *output, struct wlr_output *wlr_output)
   // read an indeterminate value and could abort on a perfectly valid output in
   // debug builds.
   output->enabled = false;
+  output->wants_enabled = false;
   output->workspace = hikari_malloc(sizeof(struct hikari_workspace));
   assert(output->workspace != NULL);
 
@@ -545,6 +546,7 @@ hikari_output_init(struct hikari_output *output, struct wlr_output *wlr_output)
     wlr_output_state_finish(&state);
 
     output->enabled = true;
+    output->wants_enabled = true;
     wl_signal_add(&wlr_output->events.frame, &output->frame);
     wl_signal_add(&wlr_output->events.request_state, &output->request_state);
 
@@ -640,6 +642,131 @@ hikari_output_init(struct hikari_output *output, struct wlr_output *wlr_output)
   }
 }
 
+static void
+destroy_output_nodes(struct hikari_output *output)
+{
+  if (output->background != NULL) {
+    wlr_scene_node_destroy(output->background);
+    output->background = NULL;
+  }
+
+  if (output->lock_indicator_node != NULL) {
+    wlr_scene_node_destroy(&output->lock_indicator_node->node);
+    output->lock_indicator_node = NULL;
+  }
+
+  if (output->lock_backdrop_node != NULL) {
+    wlr_scene_node_destroy(&output->lock_backdrop_node->node);
+    output->lock_backdrop_node = NULL;
+  }
+
+  if (output->lock_clock_node != NULL) {
+    wlr_scene_node_destroy(&output->lock_clock_node->node);
+    output->lock_clock_node = NULL;
+  }
+}
+
+// Function purpose: Hand an output's views and focus to another output.
+static void
+evacuate_output(struct hikari_output *output)
+{
+  struct hikari_workspace *workspace = output->workspace;
+  struct hikari_workspace *next_workspace = hikari_workspace_next(workspace);
+  struct hikari_workspace *merge_workspace;
+
+  if (workspace != next_workspace) {
+    merge_workspace = next_workspace;
+  } else {
+    merge_workspace = hikari_server.noop_output->workspace;
+  }
+
+  hikari_workspace_merge(workspace, merge_workspace);
+
+  if (!hikari_server_in_lock_mode()) {
+    if (!hikari_server_in_normal_mode()) {
+      hikari_server_enter_normal_mode(NULL);
+    }
+
+    hikari_workspace_focus_view(merge_workspace, NULL);
+  } else {
+    merge_workspace->focus_view = NULL;
+    hikari_server.workspace = merge_workspace;
+  }
+}
+
+void
+hikari_output_set_wants_enabled(
+    struct hikari_output *output, bool wants_enabled)
+{
+  assert(output != NULL);
+
+  if (output->wants_enabled == wants_enabled) {
+    return;
+  }
+
+  if (!wants_enabled) {
+    /* Action purpose: Cleared first so hikari_workspace_next() below skips this
+    output when choosing where the views go. */
+    output->wants_enabled = false;
+
+    evacuate_output(output);
+    destroy_output_nodes(output);
+    hikari_output_disable(output);
+
+    if (output->scene_output != NULL) {
+      wlr_scene_output_destroy(output->scene_output);
+      output->scene_output = NULL;
+    }
+
+    wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+    return;
+  }
+
+  /* Action purpose: geometry still holds the box this output had when it was
+  last part of the layout, so it comes back where it left. */
+  struct wlr_output_layout_output *l_output =
+      wlr_output_layout_add(hikari_server.output_layout,
+          output->wlr_output,
+          output->geometry.x,
+          output->geometry.y);
+
+  if (l_output == NULL) {
+    fprintf(stderr,
+        "error: failed to add output \"%s\" back to the output layout\n",
+        output->wlr_output->name);
+    return;
+  }
+
+  struct wlr_scene_output *scene_output =
+      wlr_scene_output_create(hikari_server.scene, output->wlr_output);
+
+  if (scene_output == NULL) {
+    fprintf(stderr,
+        "error: failed to recreate the scene output for \"%s\"\n",
+        output->wlr_output->name);
+    wlr_output_layout_remove(hikari_server.output_layout, output->wlr_output);
+    return;
+  }
+
+  output->scene_output = scene_output;
+  wlr_scene_output_layout_add_output(
+      hikari_server.scene_layout, l_output, scene_output);
+
+  output->wants_enabled = true;
+  hikari_output_enable(output);
+  hikari_output_update_geometry(output);
+
+  struct hikari_output_config *output_config =
+      hikari_configuration_resolve_output_config(
+          hikari_configuration, output->wlr_output->name);
+
+  if (output_config != NULL && output_config->background.value != NULL) {
+    hikari_output_load_background(output,
+        output_config->background.value,
+        output_config->background_fit.value);
+  }
+}
+
 // [COMMENT] Function purpose: Finalize and teardown an output, merging its workspace to another active output.
 void
 hikari_output_fini(struct hikari_output *output)
@@ -670,51 +797,8 @@ hikari_output_fini(struct hikari_output *output)
   struct hikari_workspace *workspace = output->workspace;
 
   if (!noop) {
-    struct hikari_workspace *merge_workspace;
-    struct hikari_workspace *next_workspace = hikari_workspace_next(workspace);
-
-    if (output->background != NULL) {
-      wlr_scene_node_destroy(output->background);
-      output->background = NULL;
-    }
-
-    if (output->lock_indicator_node != NULL) {
-      wlr_scene_node_destroy(&output->lock_indicator_node->node);
-      output->lock_indicator_node = NULL;
-    }
-
-    /* [COMMENT] Action purpose: The lock screen's own nodes go with the output
-    they were drawn for. Both are sized and positioned against this output's
-    geometry, so leaving them parented to the shared lock layer after the output
-    disappears would strand a snapshot of a monitor that is no longer there. */
-    if (output->lock_backdrop_node != NULL) {
-      wlr_scene_node_destroy(&output->lock_backdrop_node->node);
-      output->lock_backdrop_node = NULL;
-    }
-
-    if (output->lock_clock_node != NULL) {
-      wlr_scene_node_destroy(&output->lock_clock_node->node);
-      output->lock_clock_node = NULL;
-    }
-
-    if (workspace != next_workspace) {
-      merge_workspace = next_workspace;
-    } else {
-      merge_workspace = hikari_server.noop_output->workspace;
-    }
-
-    hikari_workspace_merge(workspace, merge_workspace);
-
-    if (!hikari_server_in_lock_mode()) {
-      if (!hikari_server_in_normal_mode()) {
-        hikari_server_enter_normal_mode(NULL);
-      }
-
-      hikari_workspace_focus_view(merge_workspace, NULL);
-    } else {
-      merge_workspace->focus_view = NULL;
-      hikari_server.workspace = merge_workspace;
-    }
+    destroy_output_nodes(output);
+    evacuate_output(output);
 
     wl_list_remove(&output->server_outputs);
   } else {
@@ -774,14 +858,23 @@ hikari_output_move(struct hikari_output *output, double lx, double ly)
                                                                                \
     struct wl_list *name = output->server_outputs.name;                        \
                                                                                \
-    if (name == &hikari_server.outputs) {                                      \
-      name = hikari_server.outputs.name;                                       \
+    while (name != &output->server_outputs) {                                  \
+      if (name == &hikari_server.outputs) {                                    \
+        name = hikari_server.outputs.name;                                     \
+        continue;                                                              \
+      }                                                                        \
+                                                                               \
+      struct hikari_output *name##_output =                                    \
+          wl_container_of(name, name##_output, server_outputs);                \
+                                                                               \
+      if (name##_output->wants_enabled) {                                      \
+        return name##_output;                                                  \
+      }                                                                        \
+                                                                               \
+      name = name->name;                                                       \
     }                                                                          \
                                                                                \
-    struct hikari_output *name##_output =                                      \
-        wl_container_of(name, name##_output, server_outputs);                  \
-                                                                               \
-    return name##_output;                                                      \
+    return output;                                                             \
   }
 
 CYCLE_OUTPUT(next)

@@ -168,7 +168,7 @@ find_output_by_name(struct hikari_server *server, const char *name)
   struct hikari_output *output;
 
   wl_list_for_each (output, &server->outputs, server_outputs) {
-    if (!strcmp(output->wlr_output->name, name)) {
+    if (output->wants_enabled && !strcmp(output->wlr_output->name, name)) {
       return output;
     }
   }
@@ -1271,6 +1271,13 @@ output_layout_change_handler(struct wl_listener *listener, void *data)
 
   struct hikari_output *output;
   wl_list_for_each (output, &server->outputs, server_outputs) {
+    /* Action purpose: A switched-off output is not in the layout, so its box
+    reads back as 0x0 and everything derived from it would be arranged against
+    a screen that is not there. */
+    if (!output->wants_enabled) {
+      continue;
+    }
+
     struct wlr_output *wlr_output = output->wlr_output;
 
     int old_width = output->geometry.width;
