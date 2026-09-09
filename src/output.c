@@ -877,6 +877,11 @@ hikari_output_set_wants_enabled(
 
   hikari_output_update_geometry(output);
 
+  /* Action purpose: A touch device naming this output was mapped to the whole
+  layout while it was gone, because the lookup skips outputs that are not part
+  of the desktop. Now that it is back, resolve them again. */
+  hikari_server_map_touch_devices();
+
   struct hikari_output_config *output_config =
       hikari_configuration_resolve_output_config(
           hikari_configuration, output->wlr_output->name);

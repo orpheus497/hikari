@@ -249,6 +249,12 @@ struct hikari_server {
 
 extern struct hikari_server hikari_server;
 
+/* Function purpose: Re-resolve every touch device against the outputs that
+exist now. A device naming an output that is absent falls back to the whole
+layout, so this has to run again whenever that output appears or returns. */
+void
+hikari_server_map_touch_devices(void);
+
 #ifdef HAVE_XWAYLAND
 struct wlr_xwayland_surface;
 

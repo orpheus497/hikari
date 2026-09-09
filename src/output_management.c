@@ -172,6 +172,20 @@ configuration_apply(struct wlr_output_configuration_v1 *config, bool test_only)
 
   if (success) {
     wlr_output_swapchain_manager_apply(&swapchains);
+  } else {
+    /* Action purpose: A refused commit means nothing that was asked for
+    happened, so the layout and scene halves taken above have to come back off.
+    Leaving them puts an output in the layout that is not part of the desktop --
+    which skews the extents the next output is placed against, and leaves the
+    next attach of the same output returning early, so a later rollback would
+    destroy a scene output it did not create. */
+    for (size_t i = 0; i < attached; i++) {
+      struct hikari_output *output = states[i].output->data;
+
+      if (output != NULL && states[i].base.enabled && !output->wants_enabled) {
+        hikari_output_detach(output);
+      }
+    }
   }
 
 out:

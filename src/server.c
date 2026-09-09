@@ -194,6 +194,17 @@ map_touch_to_output(struct hikari_server *server, struct wlr_input_device *devic
   wlr_cursor_map_input_to_output(server->cursor.wlr_cursor, device, mapped_output);
 }
 
+void
+hikari_server_map_touch_devices(void)
+{
+  struct hikari_server *server = &hikari_server;
+  struct hikari_touch *touch;
+
+  wl_list_for_each (touch, &server->touches, server_touches) {
+    map_touch_to_output(server, touch->device);
+  }
+}
+
 static void
 add_touch(struct hikari_server *server, struct wlr_input_device *device)
 {
@@ -362,10 +373,7 @@ new_output_handler(struct wl_listener *listener, void *data)
   // find_output_by_name() lookup fails). Retry every tracked touch device's
   // mapping now that a new output is available, so it gets confined once its
   // named output actually appears.
-  struct hikari_touch *touch;
-  wl_list_for_each (touch, &server->touches, server_touches) {
-    map_touch_to_output(server, touch->device);
-  }
+  hikari_server_map_touch_devices();
 
   /* Action purpose: Not redundant with the broadcast the layout change already
   raised. hikari_output_init() adds the output to the layout BEFORE it derives
@@ -1271,10 +1279,13 @@ output_layout_change_handler(struct wl_listener *listener, void *data)
 
   struct hikari_output *output;
   wl_list_for_each (output, &server->outputs, server_outputs) {
-    /* Action purpose: A switched-off output is not in the layout, so its box
-    reads back as 0x0 and everything derived from it would be arranged against
-    a screen that is not there. */
-    if (!output->wants_enabled) {
+    /* Action purpose: Membership in the layout, not the desktop flag, decides
+    this. An output with no box would be arranged against a screen that is not
+    there -- but one being attached is in the layout before it is flagged as
+    part of the desktop, and asking the flag would skip the very pass that
+    arranges its layer-shell surfaces. */
+    if (wlr_output_layout_get(server->output_layout, output->wlr_output) ==
+        NULL) {
       continue;
     }
 
