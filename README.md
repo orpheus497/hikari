@@ -521,8 +521,21 @@ to the project being in its `first` stages; it is currently considered
   session entry calls it directly. Without a session bus there are no portals
   (so no screen sharing), no system tray and no notifications
 * XWayland (optional) — only for X11 clients
-* xdg-desktop-portal and xdg-desktop-portal-wlr (optional) — screen sharing and
-  screenshots for applications that request them through the portal
+* The portal stack (optional) — screen sharing and screenshots for applications
+  that request them through the portal. All three pieces belong together:
+  * `xdg-desktop-portal` **1.17 or newer**. The version floor is not incidental:
+    `sakura-portals.conf` is a `portals.conf` drop-in, and that mechanism was
+    introduced in 1.17. On anything older the file is ignored, backend selection
+    falls back to matching `UseIn=` against `XDG_CURRENT_DESKTOP`, and since this
+    desktop reports itself as `Sakura` nothing matches — see
+    [the desktop name](#the-desktop-name-and-why-screen-sharing-depends-on-it).
+  * `xdg-desktop-portal-wlr` — the `wlr` backend, which is what
+    `sakura-portals.conf` pins Screenshot and ScreenCast to. It is the only
+    backend that can capture from a wlroots compositor.
+  * `xdg-desktop-portal-gtk` — the `gtk` backend, second in that file's
+    `default=wlr;gtk` preference order. It answers everything `wlr` does not
+    implement: file dialogs, print, settings, email. Without it those portal
+    requests go unanswered even though capture still works.
 * grim and slurp (optional) — used by the default `screenshot` and `screenclip`
   actions bound to `Print` and `Shift+Print`. Rebind or remove those two
   `actions` entries if you do not want them
