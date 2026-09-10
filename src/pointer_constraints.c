@@ -11,6 +11,7 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
 
@@ -43,6 +44,49 @@ view_for_surface(struct wlr_surface *surface)
   }
 
   return NULL;
+}
+
+/* Function purpose: Walk a constrained surface up to the surface that a
+hikari_view actually owns, through BOTH parent chains.
+
+Two chains, and neither alone is enough. wlr_surface_get_root_surface() climbs
+subsurface parents but stops at an xdg popup, because a popup is not a
+subsurface -- it is an xdg_surface of its own with its own wl_surface. So a
+constraint attached to a popup resolved to the popup and matched no view, and
+that is reachable rather than theoretical: wlr_xdg_surface_surface_at() tries
+wlr_xdg_surface_popup_surface_at() BEFORE wlr_surface_surface_at(), so a popup
+surface can become the seat's focused surface and carry an activated constraint.
+
+Alternating the two climbs handles a subsurface of a popup of a subsurface, which
+is what a menu inside a CSD window looks like.
+
+IDENTITY ONLY. The result must never be used as a coordinate origin: a popup and
+a subsurface each have their own space, so a region expressed against one of them
+is not expressed against the view. Confinement declines those cases at activation
+instead -- see hikari_pointer_constraint_refresh().
+
+The depth bound is cheap insurance. xdg-shell forbids a cycle among popup
+parents, but a compositor that loops forever on malformed client state is a
+denial of service, and nothing real nests anywhere near this deep. */
+static struct wlr_surface *
+constrained_view_surface(struct wlr_surface *surface)
+{
+  for (int depth = 0; surface != NULL && depth < 32; depth++) {
+    surface = wlr_surface_get_root_surface(surface);
+
+    struct wlr_xdg_surface *xdg_surface =
+        wlr_xdg_surface_try_from_wlr_surface(surface);
+
+    if (xdg_surface == NULL ||
+        xdg_surface->role != WLR_XDG_SURFACE_ROLE_POPUP ||
+        xdg_surface->popup == NULL) {
+      return surface;
+    }
+
+    surface = xdg_surface->popup->parent;
+  }
+
+  return surface;
 }
 
 /* Function purpose: Layout-space origin of a view's content, which is what a
@@ -268,12 +312,60 @@ constraint_destroy_handler(struct wl_listener *listener, void *data)
   hikari_free(constraint);
 }
 
+/* Class purpose: Armed when a region change needs the activation decision taken
+again, cleared when it fires. One at a time -- the decision reads global state,
+so a second pending call would compute the same answer. */
+static struct wl_event_source *refresh_idle = NULL;
+
+static void
+refresh_idle_handler(void *data)
+{
+  refresh_idle = NULL;
+
+  hikari_pointer_constraint_refresh();
+}
+
+/* Function purpose: Re-take the activation decision, but NOT from inside the
+surface commit that prompted it.
+
+This deferral is mandatory and must not be inlined away. Re-deciding can
+deactivate, deactivating sends `unconfined`, and
+wlr_pointer_constraint_v1_send_deactivated() DESTROYS a ONESHOT constraint --
+which calls wlr_surface_synced_finish() and so wl_list_remove()s the constraint's
+synced entry. wlroots is iterating exactly that list with a plain,
+non-safe wl_list_for_each when it dispatches the commit
+(types/wlr_compositor.c, the loop that calls synced->impl->commit), so tearing
+the constraint down underneath it frees the node the loop is standing on.
+
+An idle runs once the commit has unwound, where the destroy is harmless. */
+static void
+schedule_refresh(void)
+{
+  if (refresh_idle != NULL) {
+    return;
+  }
+
+  refresh_idle = wl_event_loop_add_idle(
+      hikari_server.event_loop, refresh_idle_handler, NULL);
+
+  if (refresh_idle == NULL) {
+    wlr_log(WLR_ERROR,
+        "could not schedule a pointer-constraint refresh; a constraint whose "
+        "region just emptied will stay active until the next focus change");
+  }
+}
+
 /* Function purpose: The constrained region changed.
 
 Nothing is cached across this: the clamp reads wlr_constraint->region fresh on
 every motion event, so a new region takes effect on the next one with no
-invalidation needed. What DOES need doing is rescuing the cursor if the client
-has just shrunk the region out from under it -- see confine_cursor_to_region().
+invalidation needed. Two things do need doing.
+
+The cursor is rescued if the client has just shrunk the region out from under it
+-- see confine_cursor_to_region(). And the activation decision is taken again,
+because a region that has become EMPTY can no longer be enforced and the client
+should be told so rather than left believing a confinement that is not happening.
+A later non-empty region reactivates through the same path.
 
 A locked pointer consults no region, so only the confined case has work here, and
 only for the constraint that is actually in force. */
@@ -283,11 +375,17 @@ constraint_set_region_handler(struct wl_listener *listener, void *data)
   struct hikari_pointer_constraint *constraint =
       wl_container_of(listener, constraint, set_region);
 
-  if (hikari_server.active_constraint != constraint) {
-    return;
+  /* Action purpose: Only the constraint in force has a cursor worth rescuing. */
+  if (hikari_server.active_constraint == constraint) {
+    confine_cursor_to_region(constraint);
   }
 
-  confine_cursor_to_region(constraint);
+  /* Action purpose: Re-decide for EVERY constraint, active or not, and that
+  asymmetry is the point. A confined constraint declined for an empty region is
+  not the active one, so gating this on that test would strand it: the client
+  could commit a perfectly good region afterwards and nothing would look again
+  until an unrelated focus change happened by. */
+  schedule_refresh();
 }
 
 static void
@@ -340,6 +438,16 @@ hikari_pointer_constraints_fini(struct hikari_server *server)
   already run for each. */
   wl_list_remove(&server->new_pointer_constraint.link);
   server->active_constraint = NULL;
+
+  /* Action purpose: Disarm a pending refresh. A client's last commit can arm one
+  moments before shutdown, and the event loop outlives this function -- it is
+  destroyed with the display at the very end of hikari_server_stop() -- so an
+  idle left armed here would still fire, against a seat and constraint set that
+  are already gone. */
+  if (refresh_idle != NULL) {
+    wl_event_source_remove(refresh_idle);
+    refresh_idle = NULL;
+  }
 }
 
 void
@@ -377,15 +485,23 @@ hikari_pointer_constraint_refresh(void)
   held. Declining to activate is the honest answer: a client that is never told
   it is confined knows that it is not.
 
-  LOCKED constraints need no origin and are deliberately not gated. A locked
-  pointer simply does not move, whatever surface it is attached to; the origin
-  matters only to the cursor hint on release, which already skips the warp when
-  it cannot be resolved. */
+  An EMPTY effective region fails for the same reason and is declined the same
+  way. wlroots builds it as the client's region intersected with the surface's
+  input region, so it is legitimately empty whenever those do not overlap, and a
+  region that confines to nowhere cannot be enforced at all. Declining here also
+  makes a region that BECOMES empty deactivate rather than silently stop working,
+  because constraint_set_region_handler() re-enters this function.
+
+  LOCKED constraints need no origin and no region, and are deliberately not
+  gated. A locked pointer simply does not move, whatever surface it is attached
+  to; the origin matters only to the cursor hint on release, which already skips
+  the warp when it cannot be resolved. */
   if (wanted != NULL && wanted->type == WLR_POINTER_CONSTRAINT_V1_CONFINED) {
     struct hikari_view *view = view_for_surface(wanted->surface);
     double ox, oy;
 
-    if (view == NULL || !view_origin(view, &ox, &oy)) {
+    if (view == NULL || !view_origin(view, &ox, &oy) ||
+        !pixman_region32_not_empty(&wanted->region)) {
       wanted = NULL;
     }
   }
@@ -458,12 +574,16 @@ hikari_pointer_constraint_confine(
   wlroots builds this region as the client's region intersected with the
   surface's input region, so it is legitimately empty whenever the two do not
   overlap -- including for a surface with no input region at all. Falling through
-  would be the worst of both worlds: wlr_region_confine() returns false for an
-  empty region, the caller would hold the cursor still, and
-  constraint_set_region_handler() could not rescue it either because
-  region_closest_point() has no rectangle to clamp into. A pointer that roams
-  while a client believes it confined is a lesser failure than one that is frozen
-  with no way back. */
+  would freeze the pointer outright: wlr_region_confine() returns false for an
+  empty region, the branch below would hold the cursor still, and
+  confine_cursor_to_region() could not rescue it either because
+  region_closest_point() has no rectangle to clamp into.
+
+  This is NOT made redundant by the matching gate in
+  hikari_pointer_constraint_refresh(). That gate takes the constraint down for
+  real, but it runs from an idle, and motion events dispatched between the commit
+  that emptied the region and that idle arrive here with the constraint still
+  active. This covers exactly that window. */
   if (!pixman_region32_not_empty(&wlr_constraint->region)) {
     return false;
   }
@@ -525,9 +645,10 @@ hikari_pointer_constraint_holds_view(struct hikari_view *view)
     return false;
   }
 
-  /* Action purpose: Compare ROOT surfaces, because a constraint may be attached
-  to a subsurface of the window rather than to the window's own surface, and this
-  question is about which VIEW holds the pointer.
+  /* Action purpose: Resolve the constrained surface to the one its VIEW owns,
+  because a constraint may be attached to a child of the window rather than to
+  the window's own surface, and this question is about which view holds the
+  pointer.
 
   A direct comparison against view->surface answered "no" for every such
   constraint, and each caller does real damage on a false negative: the three
@@ -536,11 +657,12 @@ hikari_pointer_constraint_holds_view(struct hikari_view *view)
   and leave the pointer frozen for the rest of the session, which is the exact
   failure that guard exists to prevent.
 
-  Deliberately NOT used for the coordinate lookups in this file.
-  wlr_surface_get_root_surface() walks subsurface parents only, so a subsurface's
-  region stays expressed in ITS OWN coordinates -- resolving identity is sound,
-  but reusing that view's origin for the confinement maths would put the boundary
-  in the wrong place. That case is declined at activation instead. */
-  return wlr_surface_get_root_surface(constraint->wlr_constraint->surface) ==
+  Both parent chains are walked, subsurface and xdg popup; see
+  constrained_view_surface() for why either alone leaves a hole. That resolution
+  is deliberately NOT used for the coordinate lookups in this file -- a child
+  surface's region stays expressed in ITS OWN space, so identity is sound but the
+  view's origin is not a substitute for the child's. Confinement declines those
+  cases at activation instead. */
+  return constrained_view_surface(constraint->wlr_constraint->surface) ==
          view->surface;
 }
