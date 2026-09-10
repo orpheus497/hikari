@@ -10,6 +10,7 @@
 #include <hikari/indicator.h>
 #include <hikari/indicator_frame.h>
 #include <hikari/keyboard.h>
+#include <hikari/pointer_constraints.h>
 
 #include <hikari/server.h>
 #include <hikari/view.h>
@@ -266,6 +267,16 @@ if (node != NULL) {
     }
     wlr_seat_pointer_clear_focus(seat);
   }
+
+  /* Action purpose: Seat pointer focus has just been settled -- either onto a
+  surface above or cleared below -- and that is the only input the activation
+  decision takes. Placed at the end so both branches are covered by one call
+  rather than each growing its own.
+
+  Nothing above this line was changed. Focus-follows-mouse is untouched: when a
+  client holds the pointer the cursor does not move, so motion_handler returns
+  before ever reaching this function and none of it runs. */
+  hikari_pointer_constraint_refresh();
 }
 
 static inline void

@@ -105,10 +105,14 @@ hikari_cursor_reset_image(struct hikari_cursor *cursor)
   hikari_cursor_set_image(cursor, "left_ptr");
 }
 
-static inline void
-hikari_cursor_warp(struct hikari_cursor *cursor, int x, int y)
-{
-  wlr_cursor_warp(cursor->wlr_cursor, NULL, x, y);
-}
+/* Function purpose: Move the pointer on the compositor's own initiative -- the
+one funnel every such warp in the tree reaches.
+
+Defined in src/cursor.c rather than inline here because it now has to consult
+the active pointer constraint, and pulling pointer_constraints.h into every
+translation unit that includes this header (most of them, via server.h) to
+achieve that would be the wrong trade. */
+void
+hikari_cursor_warp(struct hikari_cursor *cursor, int x, int y);
 
 #endif

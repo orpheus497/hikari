@@ -17,9 +17,11 @@
 #include <hikari/configuration.h>
 #include <hikari/memory.h>
 #include <hikari/output.h>
+#include <hikari/pointer_constraints.h>
 #include <hikari/server.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_pointer_gestures_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 
 static void
 motion_absolute_handler(struct wl_listener *listener, void *data);
@@ -782,6 +784,33 @@ hikari_cursor_set_image(struct hikari_cursor *cursor, const char *path)
   }
 }
 
+/* [COMMENT] Function purpose: The single funnel for every warp the compositor
+performs on its own initiative. Verified: hikari_cursor_center(),
+hikari_view_center_cursor(), hikari_view_top_left_cursor(),
+hikari_view_bottom_right_cursor() and hikari_workspace_center_cursor() all reach
+wlr_cursor_warp() through here and nothing bypasses it, which is what lets one
+guard cover the whole tree. */
+void
+hikari_cursor_warp(struct hikari_cursor *cursor, int x, int y)
+{
+  /* [COMMENT] Action purpose: A warp that sends the pointer somewhere else ends
+  a client's hold on it -- D-028 Ruling 8, the user's ruling that window
+  management behaves identically whether or not a client is holding the mouse.
+
+  Deactivating BEFORE the move is what keeps the two in step. Moving the cursor
+  while the client still believed itself locked would leave it reporting a
+  captured pointer that no longer matches reality, which is the desynchronised
+  state this whole feature exists to eliminate. No cursor hint is honoured: the
+  caller already has a destination in mind and the hint would fight it.
+
+  Cosmetic recentring after a geometry change does NOT reach here -- those three
+  call sites in src/view.c are gated on the constraint instead, because nobody
+  asked for the pointer to go anywhere. D-028 Ruling 9. */
+  hikari_pointer_constraint_break_for_warp();
+
+  wlr_cursor_warp(cursor->wlr_cursor, NULL, x, y);
+}
+
 void
 hikari_cursor_center(struct hikari_cursor *cursor,
     struct hikari_output *output,
@@ -804,6 +833,18 @@ motion_absolute_handler(struct wl_listener *listener, void *data)
   assert(!hikari_server_in_lock_mode());
 
   struct wlr_pointer_motion_absolute_event *event = data;
+
+  /* [COMMENT] Action purpose: A locked pointer must not be teleported by an
+  absolute device -- a tablet, a touchscreen, or a nested backend's pointer. Easy
+  to overlook because the symptom only appears on hardware the developer may not
+  have, and it would defeat the lock completely on hardware that does.
+
+  No relative motion is emitted from here: this event carries an absolute
+  position and no delta, and inventing one from the cursor's last position would
+  hand the client a jump rather than a movement. */
+  if (hikari_pointer_constraint_is_locked()) {
+    return;
+  }
 
   wlr_cursor_warp_absolute(
       cursor->wlr_cursor, &event->pointer->base, event->x, event->y);
@@ -830,8 +871,75 @@ motion_handler(struct wl_listener *listener, void *data)
 
   struct wlr_pointer_motion_event *event = data;
 
-  wlr_cursor_move(
-      cursor->wlr_cursor, &event->pointer->base, event->delta_x, event->delta_y);
+  /* [COMMENT] Action purpose: Hand the client the raw movement BEFORE the cursor
+  is touched, and hand it over unconditionally rather than only while something
+  is constrained. That is what the protocol asks for, and it is what makes
+  mouse-look work in a window that has locked nothing.
+
+  Three details, each a defect if missed. The timestamp is in MICROSECONDS, where
+  everything else in this file is milliseconds. The unaccelerated pair is a
+  genuinely different measurement from the accelerated one and libinput reports
+  both -- passing delta_x/delta_y twice would silently give every client
+  pointer acceleration it explicitly asked to avoid. And the manager is NULL when
+  its global could not be created, which this runs against on every motion event.
+
+  wlroots delivers this only to the seat's pointer-FOCUSED client and drops it
+  silently otherwise, which is why the locked path below must return before
+  anything can move focus. */
+  if (hikari_server.relative_pointer != NULL) {
+    wlr_relative_pointer_manager_v1_send_relative_motion(
+        hikari_server.relative_pointer,
+        hikari_server.seat,
+        (uint64_t)event->time_msec * 1000,
+        event->delta_x,
+        event->delta_y,
+        event->unaccel_dx,
+        event->unaccel_dy);
+  }
+
+  /* [COMMENT] Action purpose: A locked pointer does not move, and this early
+  return is the whole of that behaviour.
+
+  It is also what preserves focus-follows-mouse untouched. Returning here means
+  wlr_cursor_move() never runs, so the cursor never moves, so mode->cursor_move()
+  has nothing to re-derive -- and cursor_move() in src/normal_mode.c is the only
+  thing in the tree that refocuses on hover. No hit test, no refocus, no
+  wlr_seat_pointer_clear_focus(). The behaviour falls out of the cursor standing
+  still rather than from a special case, which is why src/normal_mode.c needs no
+  test for this state and is unchanged outside a held lock.
+
+  Keeping pointer focus is not incidental either: wlroots drops relative motion
+  for a seat with no focused client, so a path that let focus slip would leave
+  the client holding a lock that reports zero movement for ever. */
+  if (hikari_pointer_constraint_is_locked()) {
+    return;
+  }
+
+  /* [COMMENT] Action purpose: A confined pointer moves freely but cannot leave
+  the client's region -- the looser of the two constraints, and what a windowed
+  strategy game or a remote-desktop client asks for.
+
+  Warped rather than moved, because the clamp yields an absolute destination
+  rather than a delta, and warped through wlr_cursor directly rather than
+  hikari_cursor_warp() because this is the constraint being HONOURED. Going
+  through the compositor's own warp funnel would take the constraint down on
+  every single motion event, which is the exact opposite of the intent.
+
+  mode->cursor_move() still runs below either way: unlike a locked pointer, a
+  confined one is visible, moves, and must keep updating focus and the client's
+  own pointer position. */
+  double confined_x, confined_y;
+
+  if (hikari_pointer_constraint_confine(
+          event->delta_x, event->delta_y, &confined_x, &confined_y)) {
+    wlr_cursor_warp_closest(
+        cursor->wlr_cursor, &event->pointer->base, confined_x, confined_y);
+  } else {
+    wlr_cursor_move(cursor->wlr_cursor,
+        &event->pointer->base,
+        event->delta_x,
+        event->delta_y);
+  }
 
   hikari_server.mode->cursor_move(event->time_msec);
 }

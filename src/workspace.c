@@ -21,6 +21,7 @@
 #include <hikari/mark_assign_mode.h>
 #include <hikari/mark_select_mode.h>
 #include <hikari/normal_mode.h>
+#include <hikari/pointer_constraints.h>
 #include <hikari/server.h>
 #include <hikari/sheet.h>
 #include <hikari/xdg_view.h>
@@ -486,6 +487,13 @@ hikari_workspace_focus_view(
 
   hikari_server.workspace = workspace;
   workspace->focus_view = view;
+
+  /* Action purpose: This function clears seat POINTER focus above and only ever
+  restores keyboard focus, so a client holding the pointer would keep holding a
+  frozen cursor that no longer receives motion -- wlroots delivers relative
+  motion only to the pointer-focused client. The keyboard cycling actions in
+  src/server.c reach here with nothing following that would put it right. */
+  hikari_pointer_constraint_refresh();
 }
 
 void

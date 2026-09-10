@@ -21,6 +21,7 @@
 #include <hikari/memory.h>
 #include <hikari/operation.h>
 #include <hikari/output.h>
+#include <hikari/pointer_constraints.h>
 #include <hikari/reflow.h>
 #include <hikari/server.h>
 #include <hikari/sheet.h>
@@ -625,7 +626,11 @@ commit_pending_operation(
 
     commit_pending_geometry(view, &operation->geometry);
 
-    if (operation->center) {
+    /* Action purpose: This warp only recentres on the window that just resized,
+    so it must not end that window's own hold on the pointer -- a game maximizing
+    itself would otherwise break its own grab. Warps that send the pointer
+    elsewhere still do, via hikari_cursor_warp(). */
+    if (operation->center && !hikari_pointer_constraint_holds_view(view)) {
       hikari_view_center_cursor(view);
       hikari_server_cursor_focus();
     }
@@ -639,7 +644,7 @@ commit_pending_operation(
         raise_view(view);
       }
 
-      if (operation->center) {
+      if (operation->center && !hikari_pointer_constraint_holds_view(view)) {
         hikari_view_center_cursor(view);
         hikari_server_cursor_focus();
       }
@@ -1589,6 +1594,23 @@ hikari_view_unmap(struct hikari_view *view)
   handle, including the one inside the hikari_view_hide() a few lines down. */
   hikari_foreign_toplevel_destroy(&view->foreign_toplevel_management);
 
+  /* Action purpose: A hold on the pointer cannot outlive the window holding it.
+
+  wlroots ends a constraint when its SURFACE is destroyed, not when the window
+  unmaps (handle_surface_destroy listens on surface->events.destroy), and an xdg
+  toplevel may unmap and map again without ever destroying its surface. Without
+  this the constraint stays active against a window that is no longer on screen,
+  motion_handler keeps taking its locked early return, and the pointer is frozen
+  for the rest of the session with no way back.
+
+  Tested per-view rather than unconditionally so that unmapping some OTHER
+  window cannot break a lock this one never held. Placed before the hide below
+  because hikari_server_cursor_focus() there is itself gated on the constraint
+  and would do nothing while it is still up. */
+  if (hikari_pointer_constraint_holds_view(view)) {
+    hikari_pointer_constraint_deactivate();
+  }
+
   if (hikari_view_is_forced(view)) {
     view_unlink_visible(view);
     hikari_view_unset_forced(view);
@@ -1841,10 +1863,17 @@ commit_tile(struct hikari_view *view, struct hikari_operation *operation)
 
   if (!hikari_view_is_hidden(view)) {
     commit_pending_geometry(view, &operation->geometry);
-    if (operation->center) {
-      hikari_view_center_cursor(view);
+
+    /* Action purpose: Both calls are gated, not just the warp. Re-deriving focus
+    from a frozen cursor after this view resized around it can hit-test onto
+    another surface and end the hold through the focus path rather than the warp
+    path. */
+    if (!hikari_pointer_constraint_holds_view(view)) {
+      if (operation->center) {
+        hikari_view_center_cursor(view);
+      }
+      hikari_server_cursor_focus();
     }
-    hikari_server_cursor_focus();
   } else {
     hikari_view_refresh_geometry(view, &operation->geometry);
   }
@@ -2356,6 +2385,20 @@ hikari_view_evacuate(struct hikari_view *view, struct hikari_sheet *sheet)
 #ifndef NDEBUG
   printf("EVACUATE VIEW %p\n", view);
 #endif
+
+  /* Action purpose: Do not try to carry a held pointer across an output that is
+  being torn down. The constraint's region is surface-local and would survive the
+  move, but the cursor's frozen layout position belongs to a display that is
+  going away, so the hold is ended here and the client is free to ask again once
+  it has been reconfigured on its new output.
+
+  This is the one migration path that does not already end the hold by itself: a
+  move-mode drag between outputs dropped it on entry to the mode, and every
+  keyboard move recentres the cursor and so goes through hikari_cursor_warp().
+  An evacuation is driven by hikari_output_fini() and does neither. */
+  if (hikari_pointer_constraint_holds_view(view)) {
+    hikari_pointer_constraint_deactivate();
+  }
 
   clear_focus(view);
 

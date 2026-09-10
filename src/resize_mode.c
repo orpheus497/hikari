@@ -8,6 +8,7 @@
 #include <hikari/binding.h>
 #include <hikari/configuration.h>
 #include <hikari/keyboard.h>
+#include <hikari/pointer_constraints.h>
 
 #include <hikari/server.h>
 #include <hikari/view.h>
@@ -135,6 +136,8 @@ set_anchor(struct hikari_resize_mode *resize_mode, struct hikari_view *view)
 void
 hikari_resize_mode_enter(struct hikari_view *view)
 {
+  hikari_pointer_constraint_deactivate();
+
   struct hikari_indicator *indicator = &hikari_server.indicator;
 
   hikari_indicator_set_color(indicator, hikari_configuration->indicator_insert);

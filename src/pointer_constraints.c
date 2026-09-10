@@ -1,0 +1,486 @@
+/* Script function and purpose: zwp_pointer_constraints_v1 policy. Decides which
+ * client constraint is live, tells the client when it starts and stops, and
+ * answers the two questions the cursor path asks: is the pointer held, and is it
+ * held by this view. */
+
+#include <hikari/pointer_constraints.h>
+
+#include <assert.h>
+
+#include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_seat.h>
+#include <wlr/util/log.h>
+#include <wlr/util/region.h>
+
+#include <hikari/animation.h>
+#include <hikari/cursor.h>
+#include <hikari/memory.h>
+#include <hikari/output.h>
+#include <hikari/server.h>
+#include <hikari/view.h>
+
+/* Function purpose: Resolve the view backing a constrained surface, so a
+surface-local coordinate can be converted to a layout one.
+
+A linear walk of the visible views rather than a lookup table, because it needs
+no new bookkeeping to be kept correct as views map, migrate and unmap. The list
+is the visible views only -- single digits in any real session -- and the one
+caller that runs per motion event is the confinement clamp, which is already
+doing region arithmetic on the same event. Returns NULL for a surface that
+belongs to no visible view -- a layer surface, a subsurface, or a view that has
+just been hidden -- and every caller treats that as "no conversion available". */
+static struct hikari_view *
+view_for_surface(struct wlr_surface *surface)
+{
+  struct hikari_view *view;
+
+  wl_list_for_each (view, &hikari_server.visible_views, visible_server_views) {
+    if (view->surface == surface) {
+      return view;
+    }
+  }
+
+  return NULL;
+}
+
+/* Function purpose: Layout-space origin of a view's content, which is what a
+surface-local coordinate has to be added to.
+
+The animation offset is the third term and it is not optional. hikari's geometry
+jumps to the destination the moment a move is committed, while the scene node
+travels there over the animation, so the two disagree for the length of every
+animation. node_at() in src/server.c carries the same correction for the same
+reason. */
+static bool
+view_origin(struct hikari_view *view, double *ox, double *oy)
+{
+  if (view->output == NULL) {
+    return false;
+  }
+
+  struct wlr_box *geometry = hikari_view_geometry(view);
+
+  int animation_dx;
+  int animation_dy;
+  hikari_animation_offset(view, &animation_dx, &animation_dy);
+
+  *ox = view->output->geometry.x + geometry->x + animation_dx;
+  *oy = view->output->geometry.y + geometry->y + animation_dy;
+
+  return true;
+}
+
+/* Function purpose: Put the cursor where the client asked it to reappear.
+
+Callable only once the constraint is no longer the active one, which is what
+stops it recursing: hikari_cursor_warp() breaks the active constraint, and by
+here there is none. view_for_surface() returning NULL is the ordinary case for a
+surface whose view has already been hidden or unmapped, and skipping the warp is
+the right answer there. */
+static void
+warp_to_cursor_hint(struct wlr_pointer_constraint_v1 *wlr_constraint)
+{
+  if (!wlr_constraint->current.cursor_hint.enabled) {
+    return;
+  }
+
+  struct hikari_view *view = view_for_surface(wlr_constraint->surface);
+  double ox, oy;
+
+  if (view == NULL || !view_origin(view, &ox, &oy)) {
+    return;
+  }
+
+  hikari_cursor_warp(&hikari_server.cursor,
+      (int)(ox + wlr_constraint->current.cursor_hint.x),
+      (int)(oy + wlr_constraint->current.cursor_hint.y));
+}
+
+/* Function purpose: Nearest point inside a surface-local region to a
+surface-local point that is outside it.
+
+Needed because wlr_region_confine() refuses to work from a point that is already
+outside the region, and a client may legitimately shrink its region out from
+under the pointer at any commit. Without a way back in, the clamp in
+hikari_pointer_constraint_confine() would hold the cursor still for ever.
+
+Walks the region's rectangles and clamps into each, keeping the nearest result.
+x2/y2 are exclusive, so the inclusive maximum is one short of each. */
+static bool
+region_closest_point(
+    const pixman_region32_t *region, double x, double y, double *ox, double *oy)
+{
+  int nboxes = 0;
+  const pixman_box32_t *boxes = pixman_region32_rectangles(
+      (pixman_region32_t *)region, &nboxes);
+
+  bool found = false;
+  double best_x = 0;
+  double best_y = 0;
+  double best_distance = 0;
+
+  for (int i = 0; i < nboxes; i++) {
+    double cx = x;
+    double cy = y;
+
+    if (cx < boxes[i].x1) {
+      cx = boxes[i].x1;
+    } else if (cx > boxes[i].x2 - 1) {
+      cx = boxes[i].x2 - 1;
+    }
+
+    if (cy < boxes[i].y1) {
+      cy = boxes[i].y1;
+    } else if (cy > boxes[i].y2 - 1) {
+      cy = boxes[i].y2 - 1;
+    }
+
+    double dx = cx - x;
+    double dy = cy - y;
+    double distance = dx * dx + dy * dy;
+
+    if (!found || distance < best_distance) {
+      found = true;
+      best_distance = distance;
+      best_x = cx;
+      best_y = cy;
+    }
+  }
+
+  *ox = best_x;
+  *oy = best_y;
+
+  return found;
+}
+
+/* Function purpose: Put the cursor inside a confined constraint's region when it
+is not already there. Runs when the constraint activates and again whenever the
+client commits a new region.
+
+Warps through wlr_cursor directly rather than hikari_cursor_warp(): this is the
+constraint being honoured, not the compositor overriding it, so it must not take
+the constraint down on its way past. */
+static void
+confine_cursor_to_region(struct hikari_pointer_constraint *constraint)
+{
+  struct wlr_pointer_constraint_v1 *wlr_constraint = constraint->wlr_constraint;
+
+  if (wlr_constraint->type != WLR_POINTER_CONSTRAINT_V1_CONFINED) {
+    return;
+  }
+
+  struct hikari_view *view = view_for_surface(wlr_constraint->surface);
+  double ox, oy;
+
+  if (view == NULL || !view_origin(view, &ox, &oy)) {
+    return;
+  }
+
+  struct wlr_cursor *cursor = hikari_server.cursor.wlr_cursor;
+
+  double cx = cursor->x - ox;
+  double cy = cursor->y - oy;
+
+  if (pixman_region32_contains_point(
+          &wlr_constraint->region, (int)cx, (int)cy, NULL)) {
+    return;
+  }
+
+  double nx, ny;
+
+  if (region_closest_point(&wlr_constraint->region, cx, cy, &nx, &ny)) {
+    wlr_cursor_warp_closest(cursor, NULL, nx + ox, ny + oy);
+  }
+}
+
+/* Function purpose: End the active constraint.
+
+The ordering below is load-bearing and must not be rearranged.
+wlr_pointer_constraint_v1_send_deactivated() DESTROYS a ONESHOT constraint
+outright, which runs constraint_destroy_handler and frees the wrapper -- so
+hikari_server.active_constraint is cleared before the send rather than after, and
+the hint is read out first. */
+static void
+deactivate(bool honour_hint)
+{
+  struct hikari_pointer_constraint *constraint =
+      hikari_server.active_constraint;
+
+  if (constraint == NULL) {
+    return;
+  }
+
+  struct wlr_pointer_constraint_v1 *wlr_constraint = constraint->wlr_constraint;
+
+  bool warp_to_hint =
+      honour_hint && wlr_constraint->current.cursor_hint.enabled;
+  double hint_x = wlr_constraint->current.cursor_hint.x;
+  double hint_y = wlr_constraint->current.cursor_hint.y;
+  struct wlr_surface *surface = wlr_constraint->surface;
+
+  hikari_server.active_constraint = NULL;
+
+  wlr_pointer_constraint_v1_send_deactivated(wlr_constraint);
+
+  /* Action purpose: Read from the copies, not from wlr_constraint -- a ONESHOT
+  constraint was freed by the call above. */
+  if (warp_to_hint) {
+    struct hikari_view *view = view_for_surface(surface);
+    double ox, oy;
+
+    if (view != NULL && view_origin(view, &ox, &oy)) {
+      hikari_cursor_warp(
+          &hikari_server.cursor, (int)(ox + hint_x), (int)(oy + hint_y));
+    }
+  }
+}
+
+static void
+constraint_destroy_handler(struct wl_listener *listener, void *data)
+{
+  struct hikari_pointer_constraint *constraint =
+      wl_container_of(listener, constraint, destroy);
+
+  /* Action purpose: Drop the reference before the storage goes away.
+  Deliberately NOT through deactivate() -- wlroots is already destroying the
+  resource, so there is nothing left to tell the client, and send_deactivated()
+  on a constraint mid-destruction is what the `destroying` flag in wlroots exists
+  to defend against.
+
+  The hint is still honoured. This is the ordinary way a lock ends -- a client
+  releasing the pointer destroys its locked_pointer object rather than waiting to
+  be deactivated -- so skipping it here would mean the cursor almost never
+  reappeared where the client asked. */
+  if (hikari_server.active_constraint == constraint) {
+    hikari_server.active_constraint = NULL;
+    warp_to_cursor_hint(constraint->wlr_constraint);
+  }
+
+  /* Action purpose: Both removals are mandatory. wlroots asserts these listener
+  lists are empty immediately after emitting this signal, and release builds
+  define NDEBUG -- so omitting either does not abort, it leaves a freed list
+  reachable. */
+  wl_list_remove(&constraint->set_region.link);
+  wl_list_remove(&constraint->destroy.link);
+
+  hikari_free(constraint);
+}
+
+/* Function purpose: The constrained region changed.
+
+Nothing is cached across this: the clamp reads wlr_constraint->region fresh on
+every motion event, so a new region takes effect on the next one with no
+invalidation needed. What DOES need doing is rescuing the cursor if the client
+has just shrunk the region out from under it -- see confine_cursor_to_region().
+
+A locked pointer consults no region, so only the confined case has work here, and
+only for the constraint that is actually in force. */
+static void
+constraint_set_region_handler(struct wl_listener *listener, void *data)
+{
+  struct hikari_pointer_constraint *constraint =
+      wl_container_of(listener, constraint, set_region);
+
+  if (hikari_server.active_constraint != constraint) {
+    return;
+  }
+
+  confine_cursor_to_region(constraint);
+}
+
+static void
+new_constraint_handler(struct wl_listener *listener, void *data)
+{
+  struct wlr_pointer_constraint_v1 *wlr_constraint = data;
+
+  struct hikari_pointer_constraint *constraint =
+      hikari_malloc(sizeof(struct hikari_pointer_constraint));
+
+  constraint->wlr_constraint = wlr_constraint;
+  wlr_constraint->data = constraint;
+
+  constraint->set_region.notify = constraint_set_region_handler;
+  wl_signal_add(&wlr_constraint->events.set_region, &constraint->set_region);
+
+  constraint->destroy.notify = constraint_destroy_handler;
+  wl_signal_add(&wlr_constraint->events.destroy, &constraint->destroy);
+
+  /* Action purpose: A constraint is created the moment a client asks, which is
+  usually while it already holds pointer focus -- so offer it straight away
+  rather than waiting for the next motion event. */
+  hikari_pointer_constraint_refresh();
+}
+
+void
+hikari_pointer_constraints_setup(struct hikari_server *server)
+{
+  server->active_constraint = NULL;
+
+  if (server->pointer_constraints == NULL) {
+    wl_list_init(&server->new_pointer_constraint.link);
+    return;
+  }
+
+  server->new_pointer_constraint.notify = new_constraint_handler;
+  wl_signal_add(&server->pointer_constraints->events.new_constraint,
+      &server->new_pointer_constraint);
+}
+
+void
+hikari_pointer_constraints_fini(struct hikari_server *server)
+{
+  /* Action purpose: The link is always initialised -- by wl_signal_add above, or
+  by wl_list_init on the no-manager path -- so this is unconditionally safe.
+
+  No constraint teardown happens here and none is needed: hikari_server_stop()
+  calls wl_display_destroy_clients() before reaching this, so every constraint
+  has already been destroyed by its own client and constraint_destroy_handler has
+  already run for each. */
+  wl_list_remove(&server->new_pointer_constraint.link);
+  server->active_constraint = NULL;
+}
+
+void
+hikari_pointer_constraint_refresh(void)
+{
+  struct hikari_server *server = &hikari_server;
+
+  if (server->pointer_constraints == NULL) {
+    return;
+  }
+
+  struct wlr_pointer_constraint_v1 *wanted = NULL;
+
+  /* Action purpose: Only normal mode may hold the pointer. Every other mode
+  either drags the cursor itself (move, resize), redirects it (dnd), or has taken
+  the screen away entirely (lock) -- and hikari_server_in_normal_mode() excludes
+  all of them, lock mode included, in one test. */
+  if (hikari_server_in_normal_mode()) {
+    struct wlr_surface *surface = server->seat->pointer_state.focused_surface;
+
+    if (surface != NULL) {
+      wanted = wlr_pointer_constraints_v1_constraint_for_surface(
+          server->pointer_constraints, surface, server->seat);
+    }
+  }
+
+  struct hikari_pointer_constraint *active = server->active_constraint;
+
+  if (active != NULL && active->wlr_constraint == wanted) {
+    return;
+  }
+
+  deactivate(true);
+
+  if (wanted != NULL) {
+    server->active_constraint = wanted->data;
+    wlr_pointer_constraint_v1_send_activated(wanted);
+
+    /* Action purpose: A client may confine to a region the cursor is not
+    currently inside -- it picks the region, not the moment. Pull the cursor in
+    on activation so the very first motion event has a valid starting point;
+    without it wlr_region_confine() would refuse from outside and the clamp
+    below would hold the pointer still. No-ops for a locked constraint. */
+    confine_cursor_to_region(server->active_constraint);
+  }
+}
+
+/* Function purpose: Apply a confined constraint to one motion event.
+
+Answers the cursor path's question -- "is this pointer confined, and if so where
+does this delta actually land it" -- in layout coordinates, so cursor.c needs to
+know nothing about regions or surface-local space.
+
+Returns false when nothing is confined, and the caller moves the cursor normally.
+Returns true having written the destination, INCLUDING the case where the cursor
+is already outside the region and must not move: that is a legitimate state after
+a client shrinks its region, and reporting it as "no confinement" would let the
+pointer escape on the one event where the region is smallest. */
+bool
+hikari_pointer_constraint_confine(
+    double dx, double dy, double *out_x, double *out_y)
+{
+  struct hikari_pointer_constraint *constraint =
+      hikari_server.active_constraint;
+
+  if (constraint == NULL) {
+    return false;
+  }
+
+  struct wlr_pointer_constraint_v1 *wlr_constraint = constraint->wlr_constraint;
+
+  if (wlr_constraint->type != WLR_POINTER_CONSTRAINT_V1_CONFINED) {
+    return false;
+  }
+
+  /* Action purpose: Surface-local to layout, through the same origin the
+  confinement region is expressed against -- output position, view geometry, and
+  the animation offset that node_at() also carries. Without the third term the
+  boundary would sit where a moving window is HEADED rather than where it is
+  drawn, and the pointer would fight an invisible wall for the length of every
+  animation. */
+  struct hikari_view *view = view_for_surface(wlr_constraint->surface);
+  double ox, oy;
+
+  if (view == NULL || !view_origin(view, &ox, &oy)) {
+    return false;
+  }
+
+  struct wlr_cursor *cursor = hikari_server.cursor.wlr_cursor;
+
+  double cx = cursor->x - ox;
+  double cy = cursor->y - oy;
+
+  double nx, ny;
+
+  if (!wlr_region_confine(
+          &wlr_constraint->region, cx, cy, cx + dx, cy + dy, &nx, &ny)) {
+    /* Action purpose: The OLD point was already outside the region, which
+    wlr_region_confine() reports as false and which is not an error. Hold still
+    rather than moving; constraint_set_region_handler() is what puts the cursor
+    back inside when the region is what changed. */
+    *out_x = cursor->x;
+    *out_y = cursor->y;
+
+    return true;
+  }
+
+  *out_x = nx + ox;
+  *out_y = ny + oy;
+
+  return true;
+}
+
+void
+hikari_pointer_constraint_deactivate(void)
+{
+  deactivate(true);
+}
+
+void
+hikari_pointer_constraint_break_for_warp(void)
+{
+  deactivate(false);
+}
+
+bool
+hikari_pointer_constraint_is_locked(void)
+{
+  struct hikari_pointer_constraint *constraint =
+      hikari_server.active_constraint;
+
+  return constraint != NULL &&
+         constraint->wlr_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED;
+}
+
+bool
+hikari_pointer_constraint_holds_view(struct hikari_view *view)
+{
+  struct hikari_pointer_constraint *constraint =
+      hikari_server.active_constraint;
+
+  return constraint != NULL && view != NULL &&
+         constraint->wlr_constraint->surface == view->surface;
+}

@@ -32,6 +32,7 @@ extern void explicit_bzero(void *, size_t);
 #include <hikari/screen_capture.h>
 #include <hikari/lock_indicator.h>
 #include <hikari/output.h>
+#include <hikari/pointer_constraints.h>
 
 #include <hikari/server.h>
 #include <hikari/utf8.h>
@@ -1033,6 +1034,10 @@ hikari_lock_mode_enter(void)
     hikari_workspace_focus_view(workspace, NULL);
   }
 #endif
+
+  /* Action purpose: A client must not still believe it holds the pointer while
+  the screen is locked. */
+  hikari_pointer_constraint_deactivate();
 
   hikari_cursor_deactivate(&hikari_server.cursor);
 

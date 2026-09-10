@@ -47,6 +47,16 @@ struct wlr_foreign_toplevel_manager_v1;
 src/output_management.c needs the wlr-output-management header. */
 struct wlr_output_manager_v1;
 
+/* [COMMENT] Class purpose: Forward-declared for the same reason again -- the
+pointer-lock protocols are needed by src/pointer_constraints.c and src/cursor.c
+alone, and hikari_pointer_constraint is hikari's own per-constraint wrapper
+(include/hikari/pointer_constraints.h). Declaring rather than including also
+breaks what would otherwise be a cycle: pointer_constraints.h needs hikari_view,
+and view.h includes this file. */
+struct wlr_relative_pointer_manager_v1;
+struct wlr_pointer_constraints_v1;
+struct hikari_pointer_constraint;
+
 struct hikari_output;
 struct hikari_group;
 
@@ -153,6 +163,22 @@ struct hikari_server {
   struct wlr_server_decoration_manager *decoration_manager;
   struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
   struct wlr_pointer_gestures_v1 *pointer_gestures;
+
+  /* [COMMENT] Class purpose: The two protocols a game needs to capture the
+  mouse. relative_pointer carries unbounded dx/dy so a view keeps turning past
+  the screen edge; pointer_constraints is how a client asks for the cursor to be
+  pinned. Either may be NULL when its global could not be created, in which case
+  the session runs and only pointer capture is missing -- so every use is
+  guarded. See src/pointer_constraints.c. */
+  struct wlr_relative_pointer_manager_v1 *relative_pointer;
+  struct wlr_pointer_constraints_v1 *pointer_constraints;
+  struct wl_listener new_pointer_constraint;
+
+  /* [COMMENT] Class purpose: The one constraint currently in force, or NULL.
+  At most one is ever active. Cleared before wlr_pointer_constraint_v1_send_
+  deactivated() rather than after, because that call destroys a ONESHOT
+  constraint and re-enters through its destroy handler. */
+  struct hikari_pointer_constraint *active_constraint;
 
   struct wlr_xdg_shell *xdg_shell;
   struct wlr_layer_shell_v1 *layer_shell;

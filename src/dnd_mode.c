@@ -8,6 +8,7 @@
 #include <hikari/binding.h>
 #include <hikari/configuration.h>
 #include <hikari/keyboard.h>
+#include <hikari/pointer_constraints.h>
 
 #include <hikari/server.h>
 #include <hikari/view.h>
@@ -82,6 +83,8 @@ hikari_dnd_mode_init(struct hikari_dnd_mode *dnd_mode)
 void
 hikari_dnd_mode_enter(void)
 {
+  hikari_pointer_constraint_deactivate();
+
   hikari_server.mode = (struct hikari_mode *)&hikari_server.dnd_mode;
   cursor_move(0);
 }
