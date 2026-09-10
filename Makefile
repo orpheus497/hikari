@@ -78,6 +78,7 @@ OBJS = \
 	platform.o \
 	pointer.o \
 	pointer_config.o \
+	pointer_constraints.o \
 	position_config.o \
 	reflow.o \
 	resize_mode.o \

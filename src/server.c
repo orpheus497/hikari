@@ -47,7 +47,9 @@
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_pointer_gestures_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/util/log.h>
 
@@ -92,6 +94,7 @@
 #include <hikari/platform.h>
 #include <hikari/pointer.h>
 #include <hikari/pointer_config.h>
+#include <hikari/pointer_constraints.h>
 #include <hikari/animation.h>
 #include <hikari/reflow.h>
 #include <hikari/sheet.h>
@@ -1813,6 +1816,37 @@ server_init(struct hikari_server *server, char *config_path)
     exit(EXIT_FAILURE);
   }
   setup_selection(server);
+
+  /* [COMMENT] Action purpose: The two protocols a client needs to capture the
+  mouse. Created here, after setup_selection(), because the seat they are keyed
+  to does not exist until it has run.
+
+  Non-fatal on failure, unlike the pointer_gestures guard above and deliberately
+  so: a session that cannot lock the pointer cannot play games, but it is still a
+  usable session, and every read of both fields is guarded. This follows the
+  foreign_toplevel_list pattern rather than the fatal one.
+
+  wlroots supplies both implementations unconditionally (types/meson.build), so
+  there is no XML to vendor, no wayland-scanner rule, and no build switch --
+  advertising them costs nothing and nothing regresses by their presence. */
+  server->relative_pointer =
+      wlr_relative_pointer_manager_v1_create(server->display);
+  if (server->relative_pointer == NULL) {
+    wlr_log(WLR_ERROR,
+        "could not create the relative-pointer manager; games and "
+        "remote-desktop clients will not be able to capture the pointer");
+  }
+
+  server->pointer_constraints =
+      wlr_pointer_constraints_v1_create(server->display);
+  if (server->pointer_constraints == NULL) {
+    wlr_log(WLR_ERROR,
+        "could not create the pointer-constraints manager; clients will not be "
+        "able to lock or confine the pointer");
+  }
+
+  hikari_pointer_constraints_setup(server);
+
 #ifdef HAVE_XWAYLAND
   /* [COMMENT] Action purpose: Hand the seat to XWayland so its window manager
   runs the X11 selection bridge. Without this, wlroots' xwm never claims
@@ -2122,6 +2156,18 @@ hikari_server_stop(void)
 #ifdef HAVE_XWAYLAND
   wlr_xwayland_destroy(server->xwayland);
 #endif
+
+  /* Action purpose: Drop the new_constraint listener, AFTER the client teardown
+  above and not before it.
+
+  Placed here so the ordering this relies on is the ordering that actually runs.
+  wl_display_destroy_clients() destroys every constraint resource, which fires
+  each constraint's destroy handler, which removes that constraint's two
+  listeners and frees hikari's wrapper -- so by this line there is no constraint
+  left to tear down and nothing here has to walk a list. Only the manager-level
+  listener remains, and dropping it earlier would merely have been dead time
+  during which no client could have created a constraint anyway. */
+  hikari_pointer_constraints_fini(server);
 
   hikari_cursor_fini(&server->cursor);
   hikari_indicator_fini(&server->indicator);

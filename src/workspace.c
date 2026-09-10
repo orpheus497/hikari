@@ -21,6 +21,7 @@
 #include <hikari/mark_assign_mode.h>
 #include <hikari/mark_select_mode.h>
 #include <hikari/normal_mode.h>
+#include <hikari/pointer_constraints.h>
 #include <hikari/server.h>
 #include <hikari/sheet.h>
 #include <hikari/xdg_view.h>
@@ -486,6 +487,46 @@ hikari_workspace_focus_view(
 
   hikari_server.workspace = workspace;
   workspace->focus_view = view;
+
+  /* Action purpose: Put seat POINTER focus back under the cursor before the
+  constraint is re-evaluated.
+
+  This function clears pointer focus above and restores only KEYBOARD focus, and
+  the keyboard cycling actions in src/server.c reach it with nothing following
+  that would put it right. Leaving it cleared costs two things. wlroots delivers
+  relative motion only to the pointer-focused client, so a client holding the
+  pointer would sit there receiving nothing; and the refresh below decides from
+  that same focused surface, so it would resolve to "nothing under the pointer"
+  and take the constraint down even when the cursor never left the window.
+
+  A pointer-only enter, deliberately. hikari_node_focus() is NOT called: the
+  caller has just chosen which view holds focus, and re-deriving that from
+  whatever happens to lie under the cursor would overrule it. Pointer and
+  keyboard focus are independent, so the hovered surface can take pointer events
+  while `view` keeps the keyboard -- which is the whole point of doing the hit
+  test here rather than reaching for hikari_server_cursor_focus().
+
+  Skipped when clearing focus. Lock mode entry and output teardown both arrive
+  with a NULL view, there is nothing to preserve in either, and the refresh then
+  correctly takes any constraint down. */
+  if (view != NULL) {
+    double sx, sy;
+    struct wlr_surface *surface = NULL;
+    struct hikari_workspace *hovered_workspace;
+
+    hikari_server_node_at(hikari_server.cursor.wlr_cursor->x,
+        hikari_server.cursor.wlr_cursor->y,
+        &surface,
+        &hovered_workspace,
+        &sx,
+        &sy);
+
+    if (surface != NULL) {
+      wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+    }
+  }
+
+  hikari_pointer_constraint_refresh();
 }
 
 void
