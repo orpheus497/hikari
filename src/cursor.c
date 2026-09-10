@@ -846,8 +846,31 @@ motion_absolute_handler(struct wl_listener *listener, void *data)
     return;
   }
 
-  wlr_cursor_warp_absolute(
-      cursor->wlr_cursor, &event->pointer->base, event->x, event->y);
+  /* [COMMENT] Action purpose: A CONFINED pointer has to be clamped here too, or
+  an absolute device walks straight out of the region that a relative one is held
+  inside. The lock guard above is not enough on its own: confinement is the
+  looser constraint and it is the one an absolute device can defeat silently.
+
+  The event carries a position rather than a delta, so the delta is recovered by
+  converting to layout coordinates first -- the same conversion the touch
+  handlers do -- and subtracting where the cursor is now. That is a real
+  displacement rather than an invented one, which is what the clamp needs. */
+  double lx, ly;
+  wlr_cursor_absolute_to_layout_coords(
+      cursor->wlr_cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
+
+  double confined_x, confined_y;
+
+  if (hikari_pointer_constraint_confine(lx - cursor->wlr_cursor->x,
+          ly - cursor->wlr_cursor->y,
+          &confined_x,
+          &confined_y)) {
+    wlr_cursor_warp_closest(
+        cursor->wlr_cursor, &event->pointer->base, confined_x, confined_y);
+  } else {
+    wlr_cursor_warp_absolute(
+        cursor->wlr_cursor, &event->pointer->base, event->x, event->y);
+  }
 
   hikari_server.mode->cursor_move(event->time_msec);
 }

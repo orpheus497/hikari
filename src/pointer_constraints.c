@@ -366,6 +366,30 @@ hikari_pointer_constraint_refresh(void)
     }
   }
 
+  /* Action purpose: Never tell a client it is CONFINED unless the region can
+  actually be enforced.
+
+  Confinement needs an exact layout origin for the constrained surface, and
+  view_for_surface() resolves only a view's own top-level surface. A constraint
+  attached to anything else -- a subsurface, a popup, a layer surface -- has no
+  origin here, so hikari_pointer_constraint_confine() would return false on every
+  motion event and the pointer would roam freely while the client believed it
+  held. Declining to activate is the honest answer: a client that is never told
+  it is confined knows that it is not.
+
+  LOCKED constraints need no origin and are deliberately not gated. A locked
+  pointer simply does not move, whatever surface it is attached to; the origin
+  matters only to the cursor hint on release, which already skips the warp when
+  it cannot be resolved. */
+  if (wanted != NULL && wanted->type == WLR_POINTER_CONSTRAINT_V1_CONFINED) {
+    struct hikari_view *view = view_for_surface(wanted->surface);
+    double ox, oy;
+
+    if (view == NULL || !view_origin(view, &ox, &oy)) {
+      wanted = NULL;
+    }
+  }
+
   struct hikari_pointer_constraint *active = server->active_constraint;
 
   if (active != NULL && active->wlr_constraint == wanted) {
@@ -428,6 +452,22 @@ hikari_pointer_constraint_confine(
     return false;
   }
 
+  /* Action purpose: An EMPTY effective region confines to nowhere, so report it
+  as unconfined and let the pointer move normally.
+
+  wlroots builds this region as the client's region intersected with the
+  surface's input region, so it is legitimately empty whenever the two do not
+  overlap -- including for a surface with no input region at all. Falling through
+  would be the worst of both worlds: wlr_region_confine() returns false for an
+  empty region, the caller would hold the cursor still, and
+  constraint_set_region_handler() could not rescue it either because
+  region_closest_point() has no rectangle to clamp into. A pointer that roams
+  while a client believes it confined is a lesser failure than one that is frozen
+  with no way back. */
+  if (!pixman_region32_not_empty(&wlr_constraint->region)) {
+    return false;
+  }
+
   struct wlr_cursor *cursor = hikari_server.cursor.wlr_cursor;
 
   double cx = cursor->x - ox;
@@ -481,6 +521,26 @@ hikari_pointer_constraint_holds_view(struct hikari_view *view)
   struct hikari_pointer_constraint *constraint =
       hikari_server.active_constraint;
 
-  return constraint != NULL && view != NULL &&
-         constraint->wlr_constraint->surface == view->surface;
+  if (constraint == NULL || view == NULL || view->surface == NULL) {
+    return false;
+  }
+
+  /* Action purpose: Compare ROOT surfaces, because a constraint may be attached
+  to a subsurface of the window rather than to the window's own surface, and this
+  question is about which VIEW holds the pointer.
+
+  A direct comparison against view->surface answered "no" for every such
+  constraint, and each caller does real damage on a false negative: the three
+  geometry-commit sites would recentre the cursor and break a lock the window
+  never lost, and -- far worse -- hikari_view_unmap() would skip its deactivation
+  and leave the pointer frozen for the rest of the session, which is the exact
+  failure that guard exists to prevent.
+
+  Deliberately NOT used for the coordinate lookups in this file.
+  wlr_surface_get_root_surface() walks subsurface parents only, so a subsurface's
+  region stays expressed in ITS OWN coordinates -- resolving identity is sound,
+  but reusing that view's origin for the confinement maths would put the boundary
+  in the wrong place. That case is declined at activation instead. */
+  return wlr_surface_get_root_surface(constraint->wlr_constraint->surface) ==
+         view->surface;
 }
